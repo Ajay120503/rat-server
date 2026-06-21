@@ -350,12 +350,22 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, password, email } = req.body;
+    
+    // Check if username already exists
+    const existingUser = await Admin.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    
     const hashedPassword = await bcrypt.hash(password, 12);
     const admin = new Admin({ username, password: hashedPassword, email, apiKey: uuidv4() });
     await admin.save();
     const token = jwt.sign({ id: admin._id }, process.env.JWT_SECRET || 'rat_secret_key_2024', { expiresIn: '7d' });
     res.json({ token, admin: { username: admin.username, email: admin.email } });
   } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
     res.status(500).json({ error: err.message });
   }
 });
