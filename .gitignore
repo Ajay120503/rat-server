@@ -8,4 +8,4 @@ coverage/
 .vscode/
 .idea/
 .env.example
-build/
+builds/
