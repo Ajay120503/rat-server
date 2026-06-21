@@ -1,0 +1,14 @@
+# render.yaml
+services:
+  - type: web
+    name: rat-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MONGODB_URI
+        value: mongodb+srv://your_mongo_atlas_connection
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PORT
+        value: 5000
