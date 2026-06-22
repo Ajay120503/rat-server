@@ -511,15 +511,49 @@ io.on('connection', async (socket) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
-    const admin = await Admin.findOne({ username });
-    if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
+    const trimmed = username.trim();
+    console.log(`Login attempt: username="${trimmed}"`);
+    // Find by username OR email (supports old email-login accounts and new username accounts)
+    const admin = await Admin.findOne({ 
+      $or: [
+        { username: trimmed },
+        { email: trimmed }
+      ]
+    });
+    if (!admin) {
+      console.log(`Login failed: no admin found for "${trimmed}"`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     
-    const isMatch = await bcrypt.compare(password, admin.password);
-    if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+    console.log(`Found admin: username="${admin.username}" email="${admin.email}" passwordHash startsWith="${(admin.password || '').substring(0, 4)}"`);
     
+    // Support both bcrypt-hashed passwords AND old plaintext passwords
+    let isMatch = false;
+    try {
+      isMatch = await bcrypt.compare(password, admin.password);
+    } catch (bcryptErr) {
+      // If bcrypt fails (e.g., not a bcrypt hash), fall back to plaintext comparison
+      console.log('Bcrypt compare failed, trying plaintext fallback');
+      isMatch = (password === admin.password);
+    }
+    
+    if (!isMatch) {
+      console.log(`Login failed: password mismatch for user "${admin.username}"`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // If password was plaintext, upgrade to bcrypt
+    if (!admin.password.startsWith('$2a$') && !admin.password.startsWith('$2b$')) {
+      console.log(`Upgrading plaintext password to bcrypt for user "${admin.username}"`);
+      const hashedPassword = await bcrypt.hash(password, 12);
+      await Admin.updateOne({ _id: admin._id }, { $set: { password: hashedPassword } });
+    }
+    
+    console.log(`Login success: ${admin.username} (${admin.email})`);
     const token = jwt.sign({ id: admin._id }, process.env.JWT_SECRET || 'rat_secret_key_2024', { expiresIn: '7d' });
     res.json({ token, admin: { username: admin.username, email: admin.email } });
   } catch (err) {
+    console.error('Login error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -528,7 +562,14 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, password, email } = req.body;
     
-    const existingUser = await Admin.findOne({ username });
+    // Check both username and email uniqueness (old accounts may have email as username)
+    const existingUser = await Admin.findOne({ 
+      $or: [
+        { username },
+        { email: username },
+        { email }
+      ]
+    });
     if (existingUser) {
       return res.status(400).json({ error: 'Username already exists' });
     }
@@ -542,6 +583,25 @@ app.post('/api/auth/register', async (req, res) => {
     if (err.code === 11000) {
       return res.status(400).json({ error: 'Username already exists' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all devices (owned + unassigned) for admins to claim
+app.get('/api/devices/all', authMiddleware, async (req, res) => {
+  try {
+    const devices = await Device.find({
+      $or: [
+        { adminId: req.adminId },
+        { adminId: { $exists: false } },
+        { adminId: null }
+      ]
+    }).sort({ lastSeen: -1 }).lean();
+    devices.forEach(d => {
+      if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
+    });
+    res.json(devices);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
