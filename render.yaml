@@ -10,5 +10,11 @@ services:
         value: mongodb+srv://your_mongo_atlas_connection
       - key: JWT_SECRET
         generateValue: true
+      - key: CLOUDINARY_CLOUD_NAME
+        value: your_cloudinary_cloud_name
+      - key: CLOUDINARY_API_KEY
+        value: your_cloudinary_api_key
+      - key: CLOUDINARY_API_SECRET
+        value: your_cloudinary_api_secret
       - key: PORT
         value: 5000
