@@ -157,7 +157,7 @@ io.use(async (socket, next) => {
     socket.deviceId = deviceId;
     return next();
   }
-  const token = socket.handshake.auth.token;
+  const token = socket.handshake.auth?.token;
   if (token) {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'rat_secret_key_2024');
