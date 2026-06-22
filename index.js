@@ -590,17 +590,18 @@ app.post('/api/auth/register', async (req, res) => {
 // Get all devices (owned + unassigned) for admins to claim
 app.get('/api/devices/all', authMiddleware, async (req, res) => {
   try {
-    const devices = await Device.find({
-      $or: [
-        { adminId: req.adminId },
-        { adminId: { $exists: false } },
-        { adminId: null }
-      ]
-    }).sort({ lastSeen: -1 }).lean();
-    devices.forEach(d => {
+    const allDevices = await Device.find({}).sort({ lastSeen: -1 }).lean();
+    const owned = [];
+    const unassigned = [];
+    allDevices.forEach(d => {
       if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
+      if (d.adminId == null || d.adminId === '' || d.adminId === undefined) {
+        unassigned.push(d);
+      } else if (d.adminId === req.adminId) {
+        owned.push(d);
+      }
     });
-    res.json(devices);
+    res.json([...owned, ...unassigned]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -896,14 +897,19 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
 // Device assignment: admin claims an unassigned device
 app.post('/api/devices/:deviceId/assign', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOneAndUpdate(
-      { deviceId: req.params.deviceId, adminId: { $in: [null, { $exists: false }] } },
+    const device = await Device.findOne({ deviceId: req.params.deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    if (device.adminId != null && device.adminId !== '' && device.adminId !== undefined) {
+      return res.status(400).json({ error: 'Device already assigned to another admin' });
+    }
+    const updated = await Device.findOneAndUpdate(
+      { deviceId: req.params.deviceId },
       { $set: { adminId: req.adminId } },
       { new: true }
     );
-    if (!device) return res.status(404).json({ error: 'Device not found or already assigned' });
-    res.json({ success: true, device });
+    res.json({ success: true, device: updated });
   } catch (err) {
+    console.error('Assign error:', err);
     res.status(500).json({ error: err.message });
   }
 });
