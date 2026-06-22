@@ -243,7 +243,7 @@ io.on('connection', async (socket) => {
           };
 
           // For photo capture result with base64 data → Upload to Cloudinary
-          if (cleanResult && cleanResult.data && cleanResult.command === 'take_photo') {
+          if (cleanResult && cleanResult.data && (cleanResult.command === 'take_photo' || cleanResult.command === 'take_photo_front' || cleanResult.command === 'take_photo_back')) {
             try {
               const uploadRes = await cloudinary.uploader.upload(
                 `data:image/jpeg;base64,${cleanResult.data}`,
