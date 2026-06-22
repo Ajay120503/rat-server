@@ -570,6 +570,17 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// Get current user info
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const admin = await Admin.findById(req.adminId).lean();
+    if (!admin) return res.status(404).json({ error: 'User not found' });
+    res.json({ username: admin.username, email: admin.email, role: admin.role });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, password, email } = req.body;
