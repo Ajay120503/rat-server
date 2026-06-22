@@ -110,7 +110,7 @@ const ApkBuildSchema = new mongoose.Schema({
   serverUrl: String,
   wsUrl: String,
   hideAfterInstall: { type: Boolean, default: false },
-  hideLauncher: { type: Boolean, default: true },
+  hideLauncher: { type: Boolean, default: false },
   persistence: { type: Boolean, default: true },
   adminFeatures: {
     camera: { type: Boolean, default: true },
