@@ -673,6 +673,10 @@ app.post('/api/devices/:deviceId/request-access', authMiddleware, async (req, re
     if (device.adminId == null || device.adminId === '' || device.adminId === undefined) {
       return res.status(400).json({ error: 'Device is unassigned. Ask an admin to claim it first.' });
     }
+    // Prevent owner from requesting access to their own device
+    if (device.adminId === adminId) {
+      return res.status(400).json({ error: 'You already own this device' });
+    }
     // Check if already requested
     const existing = await AccessRequest.findOne({ deviceId, requesterId: adminId, status: 'pending' });
     if (existing) return res.status(400).json({ error: 'Access request already pending' });
@@ -716,19 +720,21 @@ app.get('/api/access-requests', authMiddleware, async (req, res) => {
 app.post('/api/access-requests/:requestId', authMiddleware, async (req, res) => {
   try {
     const { requestId } = req.params;
-    const { action } = req.body; // 'approve' or 'reject'
+    const { action } = req.body;
     const adminId = getAdminId(req);
     const request = await AccessRequest.findOne({ _id: requestId, ownerId: adminId });
     if (!request) return res.status(404).json({ error: 'Request not found' });
     if (request.status !== 'pending') return res.status(400).json({ error: 'Request already processed' });
+    // Prevent self-approval
+    if (request.requesterId === adminId) {
+      return res.status(400).json({ error: 'Cannot approve your own access request' });
+    }
     
     request.status = action === 'approve' ? 'approved' : 'rejected';
     request.reviewedAt = new Date();
     await request.save();
     
     if (action === 'approve') {
-      // Grant access by adding requesterId to device's sharedWith array or similar
-      // For now, we'll create a shared access record
       await Device.updateOne(
         { deviceId: request.deviceId },
         { $addToSet: { sharedWith: request.requesterId } }
