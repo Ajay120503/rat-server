@@ -1,10 +1,10 @@
-# render.yaml
 services:
   - type: web
     name: rat-backend
     env: node
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node index.js
+    healthCheckPath: /health
     envVars:
       - key: MONGODB_URI
         value: mongodb+srv://your_mongo_atlas_connection
