@@ -619,7 +619,23 @@ io.on('connection', async (socket) => {
         }
       });
 
+      // Heartbeat monitor: auto mark offline if no ping for 90 seconds
+      const heartbeatInterval = setInterval(async () => {
+        try {
+          const cutoff = new Date(Date.now() - 90 * 1000);
+          const deviceDoc = await Device.findOne({ deviceId: socket.deviceId }).lean();
+          if (deviceDoc && deviceDoc.status === 'online' && (!deviceDoc.lastSeen || new Date(deviceDoc.lastSeen) < cutoff)) {
+            await Device.findOneAndUpdate(
+              { deviceId: socket.deviceId },
+              { status: 'offline', lastSeen: new Date() }
+            );
+            io.emit('device:offline', { deviceId: socket.deviceId });
+          }
+        } catch (e) {}
+      }, 30000);
+
       socket.on('disconnect', async () => {
+        clearInterval(heartbeatInterval);
         console.log('Device disconnected:', socket.deviceId);
         await Device.findOneAndUpdate(
           { deviceId: socket.deviceId },
@@ -635,6 +651,15 @@ io.on('connection', async (socket) => {
         );
         socket.emit('device:pong');
       });
+
+      // Mark as online immediately on initial connection with device info
+      setTimeout(async () => {
+        await Device.findOneAndUpdate(
+          { deviceId: socket.deviceId },
+          { status: 'online', lastSeen: new Date() }
+        );
+        io.emit('device:online', { deviceId: socket.deviceId });
+      }, 2000);
 
     } catch (err) {
       console.error('Device connection error:', err);
