@@ -634,14 +634,25 @@ io.on('connection', async (socket) => {
         } catch (e) {}
       }, 30000);
 
+      // Track reconnection and only mark offline after grace period
+      let disconnectTimeout;
       socket.on('disconnect', async () => {
         clearInterval(heartbeatInterval);
         console.log('Device disconnected:', socket.deviceId);
-        await Device.findOneAndUpdate(
-          { deviceId: socket.deviceId },
-          { status: 'offline', lastSeen: new Date() }
-        );
-        io.emit('device:offline', { deviceId: socket.deviceId });
+        // Don't immediately mark offline - wait 30s grace period for reconnection
+        disconnectTimeout = setTimeout(async () => {
+          // Check if device reconnected by looking at current connections
+          const rooms = io.sockets.adapter.rooms;
+          const deviceRoom = rooms.get(`device:${socket.deviceId}`);
+          if (!deviceRoom || deviceRoom.size === 0) {
+            await Device.findOneAndUpdate(
+              { deviceId: socket.deviceId },
+              { status: 'offline', lastSeen: new Date() }
+            );
+            io.emit('device:offline', { deviceId: socket.deviceId });
+            console.log('Device marked offline after grace period:', socket.deviceId);
+          }
+        }, 30000);
       });
 
       socket.on('device:ping', async () => {
