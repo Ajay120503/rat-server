@@ -16,8 +16,57 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 const io = socketIO(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
+
+// ===== Rate Limiting =====
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 10000; // 10 seconds
+const MAX_COMMANDS_PER_WINDOW = 20;
+
+const checkRateLimit = (adminId) => {
+  if (!adminId) return true;
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW;
+  if (!rateLimitMap.has(adminId)) {
+    rateLimitMap.set(adminId, []);
+    return true;
+  }
+  const timestamps = rateLimitMap.get(adminId).filter(t => t > windowStart);
+  if (timestamps.length >= MAX_COMMANDS_PER_WINDOW) {
+    return false;
+  }
+  timestamps.push(now);
+  rateLimitMap.set(adminId, timestamps);
+  return true;
+};
+
+// Clean rate limit map every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  const cutoff = now - RATE_LIMIT_WINDOW * 6;
+  for (const [key, timestamps] of rateLimitMap.entries()) {
+    const valid = timestamps.filter(t => t > cutoff);
+    if (valid.length === 0) rateLimitMap.delete(key);
+    else rateLimitMap.set(key, valid);
+  }
+}, 300000);
+
+// ===== Command Queue Auto-Cleanup =====
+// Clean up old executed commands from device documents every 10 minutes
+setInterval(async () => {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
+    await mongoose.connection.db.collection('devices').updateMany(
+      {},
+      { $pull: { commands: { executedAt: { $lt: cutoff } } } }
+    );
+  } catch (err) {
+    console.error('Command cleanup error:', err.message);
+  }
+}, 600000); // 10 minutes
 
 // ===== Cloudinary Config =====
 cloudinary.config({
